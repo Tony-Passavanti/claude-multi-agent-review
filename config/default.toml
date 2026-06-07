@@ -1,0 +1,70 @@
+# Shipped defaults for claude-multi-agent-review.
+#
+# A consuming repo can override any key by creating .claude-multi-agent-review.toml
+# at its repo root. Repo-local values win; unspecified keys fall back here.
+
+# Path (relative to repo root) to the spec the reviewers enforce.
+spec_path = "CLAUDE.md"
+
+# Default branch used as the diff base for new-branch pushes. Empty string
+# means auto-detect: try `<remote>/HEAD`, then `<remote>/main`, then
+# `<remote>/master`. Set explicitly to skip auto-detect (e.g. "develop").
+default_branch = ""
+
+# Which reviewer personas to run. Names match files in src/personas/.
+#
+# Three ways to customize:
+#   1. Disable any persona: remove its name from this list.
+#   2. Override a shipped persona: drop your own <name>.md into
+#      .claude-multi-agent-review/personas/ in your repo. Repo-local files win.
+#   3. Add a custom persona: enable a new name here and provide the .md.
+#
+# The shipped defaults below cover the seven lenses worth running on most
+# repos. Each is one `claude -p` call per push; trim the list to match
+# your cost tolerance and what matters in your codebase.
+enabled_personas = [
+    "spec_conformance",   # catch-all for spec rules outside specialist lenses
+    "architecture",       # structural integrity: layering, boundaries, public API
+    "security",           # vulnerabilities, secrets, dangerous patterns
+    "tests",              # coverage of new behavior, suspicious test changes
+    "correctness",        # functional bugs, edge cases, refactor regressions
+    "performance",        # algorithmic complexity, N+1, hot-path issues
+    "agent_drift",        # AI-agent-authored failure modes (the differentiator)
+]
+
+# Model passed to `claude -p --model`. Sonnet is the cost/quality default;
+# bump to opus for higher-stakes repos at higher cost and latency.
+model = "claude-sonnet-4-6"
+
+# Run reviewers concurrently. Set false for rate-limit-sensitive setups.
+parallel = true
+
+# Soft cap on the size of the diff fed to reviewers. When the push exceeds
+# this many changed lines (insertions + deletions), the hook emits a meta
+# WARN noting that reviewers may miss issues in unsampled regions. The full
+# diff is still sent through — this is a heads-up, not a truncation. Raise
+# this for repos where large refactors are common.
+max_diff_lines = 5000
+
+# Review pushes of refs/tags/* refs. Off by default (tags rarely have a
+# meaningful diff to review).
+review_tags = false
+
+# Env var that, when set to "1", bypasses the hook with a logged notice.
+# `git push --no-verify` also bypasses (git-native, not controlled here).
+override_env = "CLAUDE_MULTI_AGENT_REVIEW_OVERRIDE"
+
+# Per-reviewer timeout in seconds. A reviewer that exceeds this is retried
+# (subject to reviewer_retries) and then resolved per treat_reviewer_failure_as.
+reviewer_timeout_seconds = 180
+
+# Retries for transient and parse-error failures. Auth errors never retry.
+# Set to 0 to disable retries; higher for flaky environments.
+reviewer_retries = 1
+
+# How to resolve a reviewer that fails after all retries are exhausted.
+#   "warn" - synthetic WARN verdict, push proceeds (default; avoids hook lockout
+#            when a single reviewer is broken)
+#   "fail" - synthetic FAIL verdict, push blocked (fail-closed; recommended for
+#            high-stakes repos where missing a review is unacceptable)
+treat_reviewer_failure_as = "warn"

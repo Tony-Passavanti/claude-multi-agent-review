@@ -1,0 +1,25 @@
+#!/usr/bin/env sh
+# Entry point for the pre-push hook.
+#
+# .git/hooks/pre-push is symlinked to (or invokes) this script. We resolve the
+# install directory, then hand off to the Python orchestrator. Stdin (the
+# pre-push ref lines) flows through unchanged; argv ($1 = remote name, $2 =
+# remote URL) is forwarded.
+
+set -eu
+
+# Resolve the directory this script lives in, following symlinks.
+SCRIPT_PATH="$0"
+while [ -L "$SCRIPT_PATH" ]; do
+  LINK_TARGET="$(readlink "$SCRIPT_PATH")"
+  case "$LINK_TARGET" in
+    /*) SCRIPT_PATH="$LINK_TARGET" ;;
+    *)  SCRIPT_PATH="$(dirname "$SCRIPT_PATH")/$LINK_TARGET" ;;
+  esac
+done
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+INSTALL_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+PYTHON="${CLAUDE_MULTI_AGENT_REVIEW_PYTHON:-python3}"
+
+exec "$PYTHON" -m src --install-root "$INSTALL_ROOT" "$@"
