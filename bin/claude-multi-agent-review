@@ -20,6 +20,21 @@ done
 SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 INSTALL_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-PYTHON="${CLAUDE_MULTI_AGENT_REVIEW_PYTHON:-python3}"
+# Resolve a Python 3 interpreter. Honor the env override if set; otherwise
+# try `python3` (Unix convention) and fall back to `python` (Windows install
+# convention, where `python3` is often a Microsoft Store redirect stub that
+# fails with a non-zero exit). Error clearly if neither works.
+PYTHON="${CLAUDE_MULTI_AGENT_REVIEW_PYTHON:-}"
+if [ -z "$PYTHON" ]; then
+  if python3 --version >/dev/null 2>&1; then
+    PYTHON=python3
+  elif python --version >/dev/null 2>&1; then
+    PYTHON=python
+  else
+    echo "claude-multi-agent-review: no working python found on PATH" >&2
+    echo "Set CLAUDE_MULTI_AGENT_REVIEW_PYTHON to the python binary path." >&2
+    exit 2
+  fi
+fi
 
 exec "$PYTHON" -m src --install-root "$INSTALL_ROOT" "$@"
