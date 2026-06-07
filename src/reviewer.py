@@ -232,6 +232,12 @@ def _parse_verdict(stdout: str, *, persona_name: str) -> Verdict | str:
     except json.JSONDecodeError as e:
         return f"claude -p output was not valid JSON: {e}"
 
+    # Valid JSON includes non-objects (lists, strings, numbers, null).
+    # `.get()` on a non-dict raises AttributeError, which would propagate
+    # out of review() and violate errors.reviewer-never-raises-on-failure.
+    if not isinstance(envelope, dict):
+        return "claude -p output was JSON but not a JSON object"
+
     result = envelope.get("result")
     if not isinstance(result, str):
         return "claude -p envelope missing string `result` field"
@@ -311,15 +317,21 @@ def _finding_from_raw(item: object, *, index: int) -> Finding | str:
     file_ = item.get("file")
     line = item.get("line")
 
+    # `bool` is a subclass of `int` in Python, so `isinstance(True, int)`
+    # returns True. Reject bools explicitly so `"line": true` doesn't
+    # silently pass validation. This matches config._config_from_dict's
+    # bool-vs-int guard so the two validators are consistent.
+    line_is_int = isinstance(line, int) and not isinstance(line, bool)
+
     if severity == "error":
         if not isinstance(file_, str) or not file_:
             return f"finding #{index} severity=error requires `file`"
-        if not isinstance(line, int):
+        if not line_is_int:
             return f"finding #{index} severity=error requires integer `line`"
 
     if file_ is not None and not isinstance(file_, str):
         return f"finding #{index} `file` must be a string"
-    if line is not None and not isinstance(line, int):
+    if line is not None and not line_is_int:
         return f"finding #{index} `line` must be an integer"
 
     spec_rule = item.get("spec_rule")
@@ -330,7 +342,7 @@ def _finding_from_raw(item: object, *, index: int) -> Finding | str:
         severity=severity,
         message=message,
         file=file_ if isinstance(file_, str) else None,
-        line=line if isinstance(line, int) else None,
+        line=line if line_is_int else None,
         spec_rule=spec_rule if isinstance(spec_rule, str) else None,
     )
 

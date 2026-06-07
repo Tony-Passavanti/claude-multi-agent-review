@@ -378,7 +378,21 @@ def run(
         )
         return 0
 
-    refs = parse_stdin(stdin)
+    try:
+        refs = parse_stdin(stdin)
+    except ValueError as e:
+        # Spec rule errors.hook-internal-exit-code-2: malformed stdin is a
+        # hook-internal failure (the hook can't do its job), not a reviewer
+        # FAIL. Exit 2 so callers don't conflate the two.
+        print(
+            f"claude-multi-agent-review: malformed pre-push stdin: {e}",
+            file=sys.stderr,
+        )
+        print(
+            "Hook exiting with code 2; push allowed to avoid lockout.",
+            file=sys.stderr,
+        )
+        return 2
     if not refs:
         return 0  # nothing to do
 
@@ -408,5 +422,5 @@ def run(
         return 2
 
     exit_code, report = aggregate.aggregate(verdicts)
-    print(report)
+    aggregate.print_report(report)
     return exit_code

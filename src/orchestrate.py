@@ -148,7 +148,7 @@ def _dispatch_sequential(
                 diff_payload=diff_text,
                 config=config,
             )
-        except Exception as e:
+        except Exception as e:  # reviewer.review shouldn't raise, but be safe
             v = _reviewer_crashed_verdict(name, e, config.treat_reviewer_failure_as)
         _stream_verdict(v, spinner=spinner)
         verdicts.append(v)
@@ -159,24 +159,53 @@ def _dispatch_sequential(
 
 def _resolve_persona_path(name: str, config: Config) -> Path | None:
     """Repo-local override wins; shipped default is fallback. Returns None
-    if neither exists — caller synthesizes a verdict for the user."""
-    local = config.repo_root / ".claude-multi-agent-review" / "personas" / f"{name}.md"
-    if local.is_file():
+    if neither exists — caller synthesizes a verdict for the user.
+
+    Path-traversal safeguard: persona names come from user-controlled TOML
+    config. A name like `../../etc/shadow` would otherwise have us read
+    arbitrary files and pass them to `claude -p` as a system prompt.
+    Resolve and verify the candidate stays under its expected root before
+    accepting it. (CLAUDE.md security.path-traversal)
+    """
+    local_root = (config.repo_root / ".claude-multi-agent-review" / "personas").resolve()
+    shipped_root = (config.install_root / "src" / "personas").resolve()
+
+    local = (local_root / f"{name}.md").resolve()
+    if _is_within(local, local_root) and local.is_file():
         return local
-    shipped = config.install_root / "src" / "personas" / f"{name}.md"
-    if shipped.is_file():
+    shipped = (shipped_root / f"{name}.md").resolve()
+    if _is_within(shipped, shipped_root) and shipped.is_file():
         return shipped
     return None
 
 
 def _read_spec(config: Config) -> str:
-    spec_path = config.repo_root / config.spec_path
+    """Read the project spec from config.spec_path, resolved against
+    repo_root. Path-traversal safeguard mirrors _resolve_persona_path:
+    a config value like `../../etc/passwd` is rejected before we read."""
+    repo_root_abs = config.repo_root.resolve()
+    spec_path = (config.repo_root / config.spec_path).resolve()
+    if not _is_within(spec_path, repo_root_abs):
+        raise FileNotFoundError(
+            f"spec_path {config.spec_path!r} resolves outside the repo "
+            "root and is rejected as a path-traversal safeguard."
+        )
     if not spec_path.is_file():
         raise FileNotFoundError(
             f"spec file not found at {spec_path}. Create CLAUDE.md at the "
             f"repo root, or set spec_path in .claude-multi-agent-review.toml."
         )
     return spec_path.read_text(encoding="utf-8")
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    """True if `path` is `root` itself or a descendant of it. Caller is
+    responsible for passing resolved (absolute) paths."""
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 # --- synthetic verdicts -----------------------------------------------------

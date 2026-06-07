@@ -37,6 +37,13 @@ class Verdict:
     findings: list[Finding] = field(default_factory=list)
 
 
+def print_report(report: str) -> None:
+    """Write the aggregated report to stdout. Centralizes the stdout
+    write in this module per CLAUDE.md output.stdout-reserved-for-aggregator
+    so callers (hook.run) can hand off without violating the rule."""
+    print(report)
+
+
 def aggregate(verdicts: list[Verdict]) -> tuple[int, str]:
     """Combine reviewer verdicts into (exit_code, formatted_report).
 
