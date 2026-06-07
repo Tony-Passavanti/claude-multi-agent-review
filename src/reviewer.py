@@ -137,6 +137,11 @@ def _run_one_attempt(
             input=stdin_payload,
             capture_output=True,
             text=True,
+            # Force UTF-8 regardless of platform locale. Without this,
+            # `text=True` uses locale.getpreferredencoding(False) — cp1252
+            # on Windows — which can't encode characters like U+2192 (→)
+            # that legitimately appear in spec text and persona prompts.
+            encoding="utf-8",
             timeout=config.reviewer_timeout_seconds,
             check=False,
         )
@@ -153,6 +158,17 @@ def _run_one_attempt(
             verdict=None,
             failure_class="environment",
             reason="`claude` CLI not found on PATH (is Claude Code installed?)",
+        )
+    except UnicodeError as e:
+        # Defense in depth: encoding="utf-8" above should make this
+        # unreachable, but if some future code path produces bytes the
+        # interpreter can't round-trip, classify as transient rather than
+        # letting it raise out of review() and violate CLAUDE.md's
+        # errors.reviewer-never-raises-on-failure rule.
+        return _AttemptOutcome(
+            verdict=None,
+            failure_class="transient",
+            reason=f"unicode error in subprocess I/O: {e}",
         )
 
     if proc.returncode != 0:
