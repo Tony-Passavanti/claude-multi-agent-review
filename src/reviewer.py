@@ -162,12 +162,18 @@ def _run_one_attempt(
     except UnicodeError as e:
         # Defense in depth: encoding="utf-8" above should make this
         # unreachable, but if some future code path produces bytes the
-        # interpreter can't round-trip, classify as transient rather than
-        # letting it raise out of review() and violate CLAUDE.md's
-        # errors.reviewer-never-raises-on-failure rule.
+        # interpreter can't round-trip, return a synthetic verdict rather
+        # than letting it raise out of review() (CLAUDE.md
+        # errors.reviewer-never-raises-on-failure).
+        #
+        # Classified as `environment`, not `transient`: unicode errors on
+        # specific bytes are deterministic — retrying the identical
+        # subprocess call against the identical inputs will always
+        # reproduce the same failure. `_NON_RETRIABLE` skips the retry
+        # loop for this class, avoiding wasted `claude -p` calls.
         return _AttemptOutcome(
             verdict=None,
-            failure_class="transient",
+            failure_class="environment",
             reason=f"unicode error in subprocess I/O: {e}",
         )
 
