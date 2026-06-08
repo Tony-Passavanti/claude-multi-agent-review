@@ -37,4 +37,11 @@ if [ -z "$PYTHON" ]; then
   fi
 fi
 
-exec "$PYTHON" -m src --install-root "$INSTALL_ROOT" "$@"
+# Hand off to the Python orchestrator. PYTHONPATH points at INSTALL_ROOT
+# so `python -m src` finds the package even when cwd is the consuming
+# repo (which is the normal case: git invokes pre-push hooks from the
+# repo being pushed, not from this install location). Do NOT cd here:
+# __main__.py reads `Path.cwd()` as repo_root, which is exactly the
+# consuming repo we want.
+PYTHONPATH="$INSTALL_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+    exec "$PYTHON" -m src --install-root "$INSTALL_ROOT" "$@"
