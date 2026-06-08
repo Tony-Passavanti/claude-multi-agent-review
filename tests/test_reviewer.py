@@ -101,6 +101,20 @@ def test_classify_transient_patterns(stderr: str) -> None:
     assert _classify_subprocess_failure(1, stderr) == "transient"
 
 
+@pytest.mark.parametrize("stderr", [
+    # Embedded substrings that LOOK like "api_key" but aren't —
+    # regex must not classify these as auth.
+    "rapidapikey",
+    "POST /v1/rapidapikey/refresh returned 500",
+    "decoded happikeyword",
+])
+def test_classify_does_not_match_embedded_api_key_substrings(stderr: str) -> None:
+    # Guards the (?:\b|_) prefix that tightened the regex after a
+    # too-permissive variant was caught in PR-A review. Without the
+    # boundary prefix, these would mis-classify as auth.
+    assert _classify_subprocess_failure(1, stderr) == "transient"
+
+
 def test_classify_default_on_empty_stderr() -> None:
     # Defensive: empty stderr defaults to transient (cheap to retry)
     # rather than auth (which would silently degrade for non-auth
@@ -134,9 +148,18 @@ def test_format_stdin_payload_strips_surrounding_whitespace() -> None:
     payload = _format_stdin_payload(spec="   spec   ", diff_payload="\n\ndiff\n\n")
     assert "spec" in payload
     assert "diff" in payload
-    # No leading whitespace before "spec" inside its section
-    spec_section = payload.split("=== PROJECT SPEC (CLAUDE.md) ===")[1].split("===")[0]
-    assert spec_section.strip().startswith("spec")
+    # Production strips whitespace from spec/diff before composing the
+    # output. The verification must NOT itself call .strip() on the
+    # section, or the test would pass whether or not stripping occurs.
+    # Instead, assert that the section's content line (after the
+    # header line and its newline) begins exactly with "spec" with no
+    # whitespace ahead of the text.
+    spec_section = payload.split("=== PROJECT SPEC (CLAUDE.md) ===\n")[1]
+    # First character of the section payload must be the 's' of 'spec',
+    # not a space — if production stops stripping, this assertion fails.
+    assert spec_section.startswith("spec"), (
+        f"expected stripped spec to start with 'spec', got {spec_section[:20]!r}"
+    )
 
 
 # --- _verdict_from_raw -----------------------------------------------------

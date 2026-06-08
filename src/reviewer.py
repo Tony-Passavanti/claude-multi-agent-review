@@ -207,11 +207,14 @@ def _run_one_attempt(
 # --- failure classification -------------------------------------------------
 
 _AUTH_PATTERNS = re.compile(
-    # `\b` boundaries on most terms to avoid false positives; the api-key
-    # variant deliberately omits word boundaries so "ANTHROPIC_API_KEY"
-    # (single identifier, no boundary before "api") still matches —
-    # caught by tests/test_reviewer.py.
-    r"\b(401|403|unauthorized|authentication|forbidden)\b|api[_\s-]?key",
+    # `\b` boundaries on most terms. The api-key variant uses
+    # `(?:\b|_)` instead — match `api` either at a word boundary OR
+    # after an underscore. This catches both standalone `api_key` and
+    # the "ANTHROPIC_API_KEY" case (single identifier, where the `_`
+    # before `API` is a word char and there's no `\b`), while still
+    # rejecting embedded substrings like `rapidapikey`. Both cases
+    # are covered by tests/test_reviewer.py.
+    r"\b(401|403|unauthorized|authentication|forbidden)\b|(?:\b|_)api[_\s-]?key",
     re.IGNORECASE,
 )
 

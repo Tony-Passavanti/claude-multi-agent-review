@@ -65,6 +65,11 @@ The hook reviews itself on push. Treat this file as a working contract.
 
 - **api.underscored-is-private** — Names starting with `_` are internal.
   Other modules MUST NOT import them. WARN.
+  *Exception:* Test modules under `tests/` are exempt. Unit-testing
+  internal validators, parsers, and classifiers is standard practice
+  and is required for adequate coverage of code paths the public API
+  does not expose directly (e.g. `_extract_first_json_object`,
+  `_verdict_from_raw`, `_classify_subprocess_failure`).
 
 ## Verdict schema source of truth
 
@@ -205,6 +210,11 @@ code. They are the agent_drift persona's main scope.
 - **agent.no-boundary-bypass** — A direct call from one module into
   another module's `_`-prefixed internals is a boundary bypass. Use the
   public API. FAIL.
+  *Exception:* Test modules under `tests/` are exempt for the same
+  reasons described under `api.underscored-is-private`. The boundary-
+  bypass concern is about production code reaching into other
+  production code's internals to avoid the public API; tests
+  legitimately need access to internals to verify them.
 
 - **agent.no-unauthorized-deps** — Adding a third-party dependency to
   `src/` is always FAIL (see `stack.no-third-party-deps-in-src`). The

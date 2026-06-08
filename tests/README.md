@@ -40,3 +40,11 @@ pytest tests/test_aggregate.py::test_aggregate_blocks_on_fail
 Integration tests that exercise the full hook flow against synthetic
 repos (e.g. `test_src_shadowing.sh`) live alongside these and run via
 `pytest` for Python tests or directly via `sh` for shell tests.
+
+### Known coverage gaps
+
+- `src/orchestrate.py` has no unit tests yet. The module's
+  `review_all()` accepts an injectable `reviewer_fn` parameter
+  specifically for testability; coverage of persona resolution,
+  missing-persona synthetic verdicts, diff-size meta-WARN, and
+  parallel/sequential dispatch is in scope for PR-B of issue #5.
