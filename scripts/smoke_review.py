@@ -68,6 +68,7 @@ def main() -> int:
         reviewer_timeout_seconds=180,
         reviewer_retries=1,
         treat_reviewer_failure_as="warn",
+        max_diff_lines=5000,
         install_root=ROOT,
         repo_root=ROOT,
     )
