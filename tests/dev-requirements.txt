@@ -1,0 +1,7 @@
+# Dev-only dependencies for running the test suite.
+# Production code under src/ uses stdlib only (see CLAUDE.md
+# stack.no-third-party-deps-in-src). Tests may use third-party
+# test frameworks per stack.dev-deps-allowed-in-tests, declared
+# here so they're not silently imported.
+
+pytest>=8.0
