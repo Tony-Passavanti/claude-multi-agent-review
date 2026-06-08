@@ -364,13 +364,14 @@ def run(
         )
         return 2
 
-    # Bypass env: drain stdin first so git doesn't see a SIGPIPE.
-    # Bare-except is justified: stdin draining is best-effort cleanup; if
-    # it fails we still want to bypass cleanly (see CLAUDE.md errors.no-bare-except).
+    # Bypass env: drain stdin best-effort so git doesn't see a SIGPIPE,
+    # then exit cleanly. Narrow to OSError (broken pipe, closed fd, etc.)
+    # per CLAUDE.md errors.no-bare-except, which forbids silent broad-
+    # catch swallows in src/.
     if os.environ.get(config.override_env) == "1":
         try:
             stdin.read()
-        except Exception:
+        except OSError:
             pass
         print(
             f"claude-multi-agent-review: bypassed ({config.override_env}=1)",

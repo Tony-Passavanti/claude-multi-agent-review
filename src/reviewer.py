@@ -15,11 +15,10 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
 
 from .aggregate import Finding, Verdict
 from .config import Config
@@ -59,7 +58,17 @@ def review(
     spec: str,
     diff_payload: str,
     config: Config,
+    log: Callable[[str], None] | None = None,
 ) -> Verdict:
+    """Run one reviewer end-to-end.
+
+    `log`, when provided, receives single-line retry-progress messages.
+    The caller is responsible for synchronizing the underlying writer if
+    this reviewer is dispatched alongside other concurrent writers (the
+    orchestrator passes a lock-aware logger per CLAUDE.md
+    output.streaming-via-lock; callers that don't share a stream — e.g.
+    scripts/smoke_review.py — can omit it or pass any plain printer).
+    """
     persona_prompt = persona_path.read_text(encoding="utf-8")
     stdin_payload = _format_stdin_payload(spec=spec, diff_payload=diff_payload)
 
@@ -84,11 +93,11 @@ def review(
             break  # retrying these is pointless — no amount of waiting helps
 
         if attempt < max_attempts:
-            print(
-                f"[{persona_name}] retry {attempt}/{max_attempts - 1}: "
-                f"{outcome.reason}",
-                file=sys.stderr,
-            )
+            if log is not None:
+                log(
+                    f"[{persona_name}] retry {attempt}/{max_attempts - 1}: "
+                    f"{outcome.reason}"
+                )
             if outcome.failure_class == "transient":
                 time.sleep(2)
             elif outcome.failure_class == "parse":

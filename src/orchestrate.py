@@ -116,6 +116,7 @@ def _dispatch_parallel(
                 spec=spec,
                 diff_payload=diff_text,
                 config=config,
+                log=_stream_line,
             ): name
             for name, path in jobs
         }
@@ -147,6 +148,7 @@ def _dispatch_sequential(
                 spec=spec,
                 diff_payload=diff_text,
                 config=config,
+                log=_stream_line,
             )
         except Exception as e:  # reviewer.review shouldn't raise, but be safe
             v = _reviewer_crashed_verdict(name, e, config.treat_reviewer_failure_as)
@@ -301,6 +303,18 @@ def _stream_verdict(v: Verdict, spinner: "_Spinner | None" = None) -> None:
             file=sys.stderr,
             flush=True,
         )
+
+
+def _stream_line(line: str) -> None:
+    """Print one line to stderr under the stream lock.
+
+    Passed as the `log` callback into reviewer.review() so retry-progress
+    messages written from worker threads cannot race with the spinner's
+    tick writes. Per CLAUDE.md output.streaming-via-lock, any code writing
+    to stderr while the spinner is running MUST acquire _stream_lock.
+    """
+    with _stream_lock:
+        print(line, file=sys.stderr, flush=True)
 
 
 # --- spinner ----------------------------------------------------------------
