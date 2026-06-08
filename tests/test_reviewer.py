@@ -109,9 +109,25 @@ def test_classify_transient_patterns(stderr: str) -> None:
     "decoded happikeyword",
 ])
 def test_classify_does_not_match_embedded_api_key_substrings(stderr: str) -> None:
-    # Guards the (?:\b|_) prefix that tightened the regex after a
-    # too-permissive variant was caught in PR-A review. Without the
+    # Guards the (?:\b|_) leading-boundary alternative. Without the
     # boundary prefix, these would mis-classify as auth.
+    assert _classify_subprocess_failure(1, stderr) == "transient"
+
+
+@pytest.mark.parametrize("stderr", [
+    # Suffix continuations of "api_key" — regex must NOT match if
+    # there's another word character after `key`. Guards the trailing
+    # \b that protects against a too-permissive variant.
+    "api_keys",
+    "api_keyboard",
+    "Loading api_keys from vault failed with 500",
+    "Restarted api_key_rotation service",
+    "apikeychain initialized",
+])
+def test_classify_does_not_match_api_key_suffix_extensions(stderr: str) -> None:
+    # Without the trailing \b in (?:\b|_)api[_\s-]?key\b, log lines
+    # like "Loading api_keys from vault failed with 500" would
+    # mis-classify as auth instead of transient.
     assert _classify_subprocess_failure(1, stderr) == "transient"
 
 
