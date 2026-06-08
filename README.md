@@ -152,9 +152,9 @@ exec ~/.local/share/claude-multi-agent-review/bin/claude-multi-agent-review "$@"
 EOF
 chmod +x .git/hooks/pre-push
 
-# 3. Create a CLAUDE.md at your repo root (start from CLAUDE.md.example
-#    in the install dir, or copy this project's CLAUDE.md as a working
-#    sample).
+# 3. Create a CLAUDE.md at your repo root. This project's own CLAUDE.md
+#    is a working example you can copy and adapt; an annotated template
+#    file (CLAUDE.md.example) is tracked at issue #2.
 ```
 
 Requirements:
