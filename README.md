@@ -142,7 +142,9 @@ this is what that looks like.
 In any repo you want to enable the hook on:
 
 ```sh
-# 1. Clone this repo somewhere stable
+# 1. Clone this repo somewhere stable. The `mkdir -p` covers fresh
+#    accounts where ~/.local/share doesn't exist yet (common on macOS).
+mkdir -p ~/.local/share
 git clone https://github.com/Tony-Passavanti/claude-multi-agent-review ~/.local/share/claude-multi-agent-review
 
 # 2. From inside the repo you want to protect:
