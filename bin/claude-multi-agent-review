@@ -37,4 +37,21 @@ if [ -z "$PYTHON" ]; then
   fi
 fi
 
-exec "$PYTHON" -m src --install-root "$INSTALL_ROOT" "$@"
+# Hand off to the Python orchestrator. Two flags work together to make
+# this safe when invoked from a consuming repo that has its own `src/`
+# package (extremely common — the standard "src layout"):
+#
+#   `-P`  (Python 3.11+) tells Python NOT to prepend a "potentially
+#         unsafe path" (cwd for `-m`) to sys.path. Without this, cwd
+#         would be searched before PYTHONPATH and the consuming repo's
+#         `src/` would shadow ours.
+#
+#   PYTHONPATH=INSTALL_ROOT adds the install location to sys.path so
+#         `python -m src` finds OUR `src/` package via the explicit
+#         path rather than via cwd.
+#
+# Do NOT cd here: __main__.py reads `Path.cwd()` as repo_root, which
+# is the consuming repo (what git invoked us from). cwd-as-sys-path
+# is what we're suppressing; cwd-as-process-state is what we need.
+PYTHONPATH="$INSTALL_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+    exec "$PYTHON" -P -m src --install-root "$INSTALL_ROOT" "$@"
