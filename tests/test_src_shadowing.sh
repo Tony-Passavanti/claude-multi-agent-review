@@ -38,12 +38,17 @@ mkdir -p "$TMP_DIR/src"
 echo "# decoy src package (would shadow ours without -P + PYTHONPATH)" \
   > "$TMP_DIR/src/__init__.py"
 
-# Invoke the shim from the consuming repo's cwd. Empty stdin (no refs
-# being pushed) → the hook should short-circuit on empty payload and
-# exit 0.
+# Invoke the shim the way git does: only the positional `remote_name`
+# and `remote_url` args (no --install-root — the shim adds that itself
+# before exec'ing python). If a future change to the shim drops the
+# `--install-root "$INSTALL_ROOT"` forward, argparse in __main__.py
+# would crash with "required argument" — and we want this test to
+# catch that, not mask it by supplying the arg ourselves.
+#
+# Empty stdin (no refs being pushed) → the hook should short-circuit
+# on empty payload and exit 0.
 cd "$TMP_DIR"
-output="$(echo "" | "$SHIM" --install-root "$INSTALL_ROOT" \
-  origin "fake-remote-url" 2>&1)"
+output="$(echo "" | "$SHIM" origin "fake-remote-url" 2>&1)"
 rc=$?
 
 if [ "$rc" -ne 0 ]; then
