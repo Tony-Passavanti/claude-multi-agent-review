@@ -207,7 +207,13 @@ def _run_one_attempt(
 # --- failure classification -------------------------------------------------
 
 _AUTH_PATTERNS = re.compile(
-    r"\b(401|403|unauthorized|authentication|api[_\s-]?key|forbidden)\b",
+    # `\b` boundaries on most terms. The api-key variant uses
+    # `(?:\b|_)…\b` — leading boundary OR underscore (so "ANTHROPIC_
+    # API_KEY", a single identifier where the `_` before `API` is a
+    # word char, still matches) and a regular trailing `\b` (so
+    # "api_keys" / "api_keyboard" / "api_key_rotation" do NOT match).
+    # All four edges covered by tests/test_reviewer.py.
+    r"\b(401|403|unauthorized|authentication|forbidden)\b|(?:\b|_)api[_\s-]?key\b",
     re.IGNORECASE,
 )
 
