@@ -586,7 +586,10 @@ def test_review_with_non_utf8_persona_file_returns_synthetic_verdict(
     )
     assert isinstance(v, Verdict)
     assert v.verdict == "WARN"
-    # Diagnostic content: the file path AND a hint about the decode
-    # failure should appear in the reasoning.
+    # The file name appears in the reasoning so a user troubleshooting
+    # this WARN can find the offending persona file. Deliberately NOT
+    # asserting on prefix phrasing (e.g. "could not read") — that's
+    # `_synthetic_verdict`'s reason-template detail, not a contract
+    # of `review()` itself. The environment-classification property
+    # is covered by test_review_persona_read_failure_classified_environment.
     assert "bad-encoding.md" in v.reasoning
-    assert "could not read" in v.reasoning.lower()
