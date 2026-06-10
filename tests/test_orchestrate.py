@@ -351,13 +351,45 @@ def test_review_all_catches_reviewer_exception_sequential(
 def test_review_all_catches_reviewer_exception_parallel(
     make_persona, make_config,
 ) -> None:
-    make_persona("flaky")
-    cfg = make_config(enabled_personas=["flaky"], parallel=True)
+    # Two personas required to actually exercise `_dispatch_parallel`:
+    # review_all() falls back to sequential when len(real_jobs) <= 1
+    # regardless of config.parallel. With one persona, this test would
+    # silently exercise the sequential path and miss any regression in
+    # the parallel branch's ThreadPoolExecutor exception handling.
+    make_persona("flaky1")
+    make_persona("flaky2")
+    cfg = make_config(enabled_personas=["flaky1", "flaky2"], parallel=True)
     def crashing_reviewer(**kwargs):
         raise RuntimeError("simulated crash")
     verdicts = review_all(_payload(), cfg, reviewer_fn=crashing_reviewer)
-    assert len(verdicts) == 1
-    assert verdicts[0].verdict == "WARN"
+    assert len(verdicts) == 2
+    assert all(v.verdict == "WARN" for v in verdicts)
+    assert all("crashed" in v.summary for v in verdicts)
+
+
+def test_review_all_parallel_one_crash_does_not_block_others(
+    make_persona, make_config,
+) -> None:
+    # Same property as the sequential `one_crash_does_not_block_other_reviewers`
+    # test, but verifying it holds on the parallel dispatch path too —
+    # `as_completed`'s per-future exception handling must isolate crashes.
+    make_persona("ok1")
+    make_persona("ok2")
+    make_persona("flaky")
+    cfg = make_config(
+        enabled_personas=["ok1", "ok2", "flaky"], parallel=True,
+    )
+    def selective_crasher(**kwargs):
+        if kwargs["persona_name"] == "flaky":
+            raise RuntimeError("just this one")
+        return _verdict(kwargs["persona_name"])
+    verdicts = review_all(_payload(), cfg, reviewer_fn=selective_crasher)
+    assert len(verdicts) == 3
+    by_name = {v.agent_name: v for v in verdicts}
+    assert by_name["ok1"].verdict == "PASS"
+    assert by_name["ok2"].verdict == "PASS"
+    assert by_name["flaky"].verdict == "WARN"
+    assert "crashed" in by_name["flaky"].summary
 
 
 def test_review_all_one_crash_does_not_block_other_reviewers(
