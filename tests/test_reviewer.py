@@ -422,3 +422,137 @@ def test_parse_verdict_result_with_prose_wrapped_json() -> None:
     envelope = json.dumps({"result": wrapped})
     v = _parse_verdict(envelope, persona_name="architecture")
     assert isinstance(v, Verdict)
+
+
+# --- review() persona-file read guard (closes issue #7) -------------------
+#
+# CLAUDE.md errors.reviewer-never-raises-on-failure: review() MUST always
+# return a Verdict, even when the persona file is unreadable. Previously
+# this raised OSError out of review() because the read_text call had no
+# guard. The orchestrator's broad except still caught it, but the contract
+# on review() itself was technically broken.
+
+from pathlib import Path  # noqa: E402 — kept local to the new section
+
+from src.config import Config  # noqa: E402
+from src.reviewer import review  # noqa: E402
+
+
+def _basic_config(install_root: Path, mode: str = "warn") -> Config:
+    return Config(
+        spec_path=Path("CLAUDE.md"),
+        default_branch="",
+        enabled_personas=["x"],
+        model="claude-sonnet-4-6",
+        parallel=False,
+        review_tags=False,
+        override_env="CLAUDE_MULTI_AGENT_REVIEW_OVERRIDE",
+        reviewer_timeout_seconds=180,
+        reviewer_retries=1,
+        treat_reviewer_failure_as=mode,
+        max_diff_lines=5000,
+        install_root=install_root,
+        repo_root=install_root,
+    )
+
+
+def test_review_with_nonexistent_persona_path_returns_synthetic_verdict(
+    tmp_path: Path,
+) -> None:
+    cfg = _basic_config(tmp_path)
+    missing = tmp_path / "definitely-does-not-exist.md"
+    v = review(
+        persona_name="ghost",
+        persona_path=missing,
+        spec="# spec",
+        diff_payload="diff",
+        config=cfg,
+    )
+    assert isinstance(v, Verdict)
+    assert v.agent_name == "ghost"
+    assert v.verdict == "WARN"
+    assert "environment" in v.summary
+    # The path or its name appears in the reasoning for diagnosability.
+    assert "definitely-does-not-exist.md" in v.reasoning
+
+
+def test_review_persona_read_failure_fail_mode(tmp_path: Path) -> None:
+    # When treat_reviewer_failure_as="fail", the synthetic verdict is
+    # FAIL — push gets blocked — instead of WARN.
+    cfg = _basic_config(tmp_path, mode="fail")
+    v = review(
+        persona_name="ghost",
+        persona_path=tmp_path / "missing.md",
+        spec="# spec",
+        diff_payload="diff",
+        config=cfg,
+    )
+    assert v.verdict == "FAIL"
+
+
+def test_review_persona_read_failure_does_not_invoke_subprocess(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    # If read_text fails, we never get to claude -p. Verify that by
+    # monkeypatching subprocess.run to fail loudly if called.
+    import subprocess as subprocess_mod
+    called = []
+    def loud_run(*a, **kw):
+        called.append((a, kw))
+        raise AssertionError("subprocess.run must not be invoked when "
+                             "persona file is unreadable")
+    monkeypatch.setattr(subprocess_mod, "run", loud_run)
+    cfg = _basic_config(tmp_path)
+    v = review(
+        persona_name="ghost",
+        persona_path=tmp_path / "missing.md",
+        spec="# spec",
+        diff_payload="diff",
+        config=cfg,
+    )
+    assert v.verdict == "WARN"
+    assert called == []
+
+
+def test_review_persona_read_failure_classified_environment(
+    tmp_path: Path,
+) -> None:
+    # The synthetic verdict's reasoning must name the failure class
+    # as `environment` (not transient, auth, or parse) — that's what
+    # tells the operator the file isn't going to appear and a retry
+    # won't help.
+    cfg = _basic_config(tmp_path)
+    v = review(
+        persona_name="ghost",
+        persona_path=tmp_path / "missing.md",
+        spec="# spec",
+        diff_payload="diff",
+        config=cfg,
+    )
+    assert "environment" in v.reasoning
+
+
+def test_review_with_unreadable_persona_path_returns_synthetic_verdict(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    # Distinct from "file missing": file exists but read_text raises
+    # PermissionError (e.g., restrictive ACLs). Cross-platform-safe via
+    # monkeypatch rather than chmod.
+    persona_path = tmp_path / "restricted.md"
+    persona_path.write_text("# whatever\n", encoding="utf-8")
+
+    def deny_read(self, *a, **kw):  # noqa: ANN001
+        raise PermissionError(f"Permission denied: {self}")
+
+    monkeypatch.setattr(Path, "read_text", deny_read)
+
+    cfg = _basic_config(tmp_path)
+    v = review(
+        persona_name="locked",
+        persona_path=persona_path,
+        spec="# spec",
+        diff_payload="diff",
+        config=cfg,
+    )
+    assert v.verdict == "WARN"
+    assert "Permission denied" in v.reasoning

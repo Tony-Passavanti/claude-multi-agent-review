@@ -69,7 +69,27 @@ def review(
     output.streaming-via-lock; callers that don't share a stream — e.g.
     scripts/smoke_review.py — can omit it or pass any plain printer).
     """
-    persona_prompt = persona_path.read_text(encoding="utf-8")
+    # Read the persona prompt. Guard against the file being unreadable
+    # (deleted between _resolve_persona_path's existence check and this
+    # read; PermissionError from restrictive ACLs; IsADirectoryError if
+    # a misconfiguration points the resolver at a directory). Without
+    # this guard, OSError propagates out of review() and violates
+    # CLAUDE.md errors.reviewer-never-raises-on-failure.
+    # Classified as `environment` — the file isn't going to appear
+    # between two `claude -p` retries, so retrying is wasteful.
+    try:
+        persona_prompt = persona_path.read_text(encoding="utf-8")
+    except OSError as e:
+        return _synthetic_verdict(
+            persona_name=persona_name,
+            outcome=_AttemptOutcome(
+                verdict=None,
+                failure_class="environment",
+                reason=f"could not read persona file {persona_path}: {e}",
+            ),
+            attempts=1,
+            mode=config.treat_reviewer_failure_as,
+        )
     stdin_payload = _format_stdin_payload(spec=spec, diff_payload=diff_payload)
 
     max_attempts = config.reviewer_retries + 1
