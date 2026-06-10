@@ -560,3 +560,33 @@ def test_review_with_unreadable_persona_path_returns_synthetic_verdict(
     )
     assert v.verdict == "WARN"
     assert "Permission denied" in v.reasoning
+
+
+def test_review_with_non_utf8_persona_file_returns_synthetic_verdict(
+    tmp_path: Path,
+) -> None:
+    # Persona file exists and is readable but contains non-UTF-8 bytes
+    # (e.g. a Windows-1252 override or a file cloned with the wrong
+    # encoding). `Path.read_text(encoding="utf-8")` raises
+    # `UnicodeDecodeError`, which inherits from `ValueError`, NOT
+    # `OSError`. The guard must catch `UnicodeError` (the parent of
+    # UnicodeDecodeError) explicitly or this case escapes review()
+    # and violates errors.reviewer-never-raises-on-failure.
+    persona_path = tmp_path / "bad-encoding.md"
+    # 0xe9 is `é` in Windows-1252 / Latin-1 but is an invalid start
+    # byte for a continuation in UTF-8.
+    persona_path.write_bytes(b"# persona\nthis byte is bad: \xe9\n")
+    cfg = _basic_config(tmp_path)
+    v = review(
+        persona_name="badencoding",
+        persona_path=persona_path,
+        spec="# spec",
+        diff_payload="diff",
+        config=cfg,
+    )
+    assert isinstance(v, Verdict)
+    assert v.verdict == "WARN"
+    # Diagnostic content: the file path AND a hint about the decode
+    # failure should appear in the reasoning.
+    assert "bad-encoding.md" in v.reasoning
+    assert "could not read" in v.reasoning.lower()
