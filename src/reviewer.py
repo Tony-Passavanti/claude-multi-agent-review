@@ -69,7 +69,34 @@ def review(
     output.streaming-via-lock; callers that don't share a stream — e.g.
     scripts/smoke_review.py — can omit it or pass any plain printer).
     """
-    persona_prompt = persona_path.read_text(encoding="utf-8")
+    # Read the persona prompt. Guard against the file being unreadable
+    # for any reason that prevents review() from completing:
+    #   - OSError (and subclasses): FileNotFoundError if the file was
+    #     deleted between _resolve_persona_path's existence check and
+    #     this read; PermissionError from restrictive ACLs;
+    #     IsADirectoryError if misconfiguration points at a directory.
+    #   - UnicodeError (and subclasses): UnicodeDecodeError if a
+    #     persona file exists but contains non-UTF-8 bytes (e.g. a
+    #     Windows-1252 override file). UnicodeDecodeError inherits
+    #     from ValueError, NOT from OSError, so it needs to be
+    #     caught explicitly.
+    # Without these guards, the exception propagates out of review()
+    # and violates CLAUDE.md errors.reviewer-never-raises-on-failure.
+    # All classified as `environment` — none retriable; the file isn't
+    # going to fix itself between two `claude -p` retries.
+    try:
+        persona_prompt = persona_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as e:
+        return _synthetic_verdict(
+            persona_name=persona_name,
+            outcome=_AttemptOutcome(
+                verdict=None,
+                failure_class="environment",
+                reason=f"could not read persona file {persona_path}: {e}",
+            ),
+            attempts=1,
+            mode=config.treat_reviewer_failure_as,
+        )
     stdin_payload = _format_stdin_payload(spec=spec, diff_payload=diff_payload)
 
     max_attempts = config.reviewer_retries + 1
