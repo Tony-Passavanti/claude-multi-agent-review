@@ -30,21 +30,30 @@ pytest tests/test_aggregate.py::test_aggregate_blocks_on_fail
 
 ## Layout
 
+### Python unit tests (pytest)
+
 | File | Covers |
 |---|---|
 | `test_aggregate.py` | exit-code rules, verdict ordering, report formatting |
 | `test_config.py` | TOML loader, validation gauntlet, forward-compat |
 | `test_hook.py` | stdin parsing, zero-SHA detection, payload formatting, RefUpdate properties |
 | `test_reviewer.py` | JSON extraction, verdict/finding validators, failure classifier |
+| `test_orchestrate.py` | persona resolution, missing-persona synthetic verdicts, diff-size meta-WARN, dispatch (parallel/sequential), reviewer-crash safety net |
 
-Integration tests that exercise the full hook flow against synthetic
-repos (e.g. `test_src_shadowing.sh`) live alongside these and run via
-`pytest` for Python tests or directly via `sh` for shell tests.
+`conftest.py` provides shared fixtures: `install_root`, `repo_root`,
+`make_config`, `make_persona`, `make_local_persona`.
 
-### Known coverage gaps
+### Shell integration tests
 
-- `src/orchestrate.py` has no unit tests yet. The module's
-  `review_all()` accepts an injectable `reviewer_fn` parameter
-  specifically for testability; coverage of persona resolution,
-  missing-persona synthetic verdicts, diff-size meta-WARN, and
-  parallel/sequential dispatch is in scope for PR-B of issue #5.
+| File | Covers |
+|---|---|
+| `test_src_shadowing.sh` | regression guard for PR #8's `python -P` + PYTHONPATH fix: shim invoked from a tmp consuming repo with a conflicting top-level `src/` must still exit cleanly |
+
+Run shell tests directly:
+
+```sh
+sh tests/test_src_shadowing.sh
+```
+
+The full test suite (Python + shell) will be wired into CI under
+issue #6.
