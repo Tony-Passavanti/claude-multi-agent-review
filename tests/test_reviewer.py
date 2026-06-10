@@ -471,8 +471,12 @@ def test_review_with_nonexistent_persona_path_returns_synthetic_verdict(
     assert isinstance(v, Verdict)
     assert v.agent_name == "ghost"
     assert v.verdict == "WARN"
-    assert "environment" in v.summary
     # The path or its name appears in the reasoning for diagnosability.
+    # NOTE: deliberately NOT asserting on v.summary's content — the
+    # classification visibility is checked in
+    # test_review_persona_read_failure_classified_environment via the
+    # reasoning field, which is the most reliable surface (the summary's
+    # format is _synthetic_verdict's responsibility and may change).
     assert "definitely-does-not-exist.md" in v.reasoning
 
 
