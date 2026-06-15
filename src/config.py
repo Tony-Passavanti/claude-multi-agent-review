@@ -41,7 +41,19 @@ _SCHEMA: dict[str, type] = {
     "max_diff_lines": int,
 }
 
+# Optional keys: validated when present, defaulted when absent. Kept off
+# `_SCHEMA` so older shipped defaults (or test fixtures that pre-date the
+# key) don't fail validation.
+_OPTIONAL_KEYS: tuple[str, ...] = ("reviewer_gates",)
+
 _FAILURE_MODES = ("warn", "fail")
+
+
+@dataclass(frozen=True)
+class ReviewerGate:
+    name: str
+    patterns: list[str]
+    personas: list[str]
 
 
 @dataclass(frozen=True)
@@ -59,6 +71,7 @@ class Config:
     max_diff_lines: int
     install_root: Path
     repo_root: Path
+    reviewer_gates: list[ReviewerGate] = field(default_factory=list)
     extra: dict[str, object] = field(default_factory=dict)
 
 
@@ -150,10 +163,14 @@ def _config_from_dict(
             f"{_FAILURE_MODES}, got {failure_mode!r}"
         )
 
+    # reviewer_gates: optional. Validate shape if present; default to [].
+    reviewer_gates = _parse_reviewer_gates(data.get("reviewer_gates", []))
+
     # Forward-compat: unknown keys go to `extra` and are surfaced as a
     # one-line notice. Not an error — a newer config file should still be
     # readable by an older hook (with the new features silently inactive).
-    extra = {k: v for k, v in data.items() if k not in _SCHEMA}
+    known = set(_SCHEMA) | set(_OPTIONAL_KEYS)
+    extra = {k: v for k, v in data.items() if k not in known}
     if extra:
         for k in extra:
             print(
@@ -176,5 +193,64 @@ def _config_from_dict(
         max_diff_lines=data["max_diff_lines"],
         install_root=install_root,
         repo_root=repo_root,
+        reviewer_gates=reviewer_gates,
         extra=extra,
     )
+
+
+def _parse_reviewer_gates(raw: object) -> list[ReviewerGate]:
+    """Validate `reviewer_gates` and convert to a list of ReviewerGate.
+
+    Each entry must be a table with string `name`, list-of-str `patterns`,
+    and list-of-str `personas`. Empty `patterns` or `personas` are
+    rejected because they describe gates that can never usefully apply.
+    """
+    if not isinstance(raw, list):
+        raise ValueError(
+            f"config key 'reviewer_gates': expected list, got "
+            f"{type(raw).__name__}"
+        )
+    gates: list[ReviewerGate] = []
+    for i, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"reviewer_gates[{i}]: expected table, got "
+                f"{type(entry).__name__}"
+            )
+        for key, expected in (("name", str), ("patterns", list),
+                              ("personas", list)):
+            if key not in entry:
+                raise ValueError(
+                    f"reviewer_gates[{i}]: missing required key {key!r}"
+                )
+            if not isinstance(entry[key], expected):
+                raise ValueError(
+                    f"reviewer_gates[{i}].{key}: expected "
+                    f"{expected.__name__}, got {type(entry[key]).__name__}"
+                )
+        if not entry["patterns"]:
+            raise ValueError(
+                f"reviewer_gates[{i}].patterns: must not be empty"
+            )
+        if not entry["personas"]:
+            raise ValueError(
+                f"reviewer_gates[{i}].personas: must not be empty"
+            )
+        for j, p in enumerate(entry["patterns"]):
+            if not isinstance(p, str):
+                raise ValueError(
+                    f"reviewer_gates[{i}].patterns[{j}]: expected string, "
+                    f"got {type(p).__name__}"
+                )
+        for j, p in enumerate(entry["personas"]):
+            if not isinstance(p, str):
+                raise ValueError(
+                    f"reviewer_gates[{i}].personas[{j}]: expected string, "
+                    f"got {type(p).__name__}"
+                )
+        gates.append(ReviewerGate(
+            name=entry["name"],
+            patterns=list(entry["patterns"]),
+            personas=list(entry["personas"]),
+        ))
+    return gates
