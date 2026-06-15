@@ -217,7 +217,6 @@ def _select_personas(
         # rather than guess at intent on an empty change set.
         return list(config.enabled_personas), None
 
-    enabled_set = set(config.enabled_personas)
     for gate in config.reviewer_gates:
         if not _gate_covers_all(gate, changed):
             continue
