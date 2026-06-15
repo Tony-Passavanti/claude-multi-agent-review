@@ -504,6 +504,61 @@ def test_changed_files_from_payload_quoted_path_with_space() -> None:
     assert _changed_files_from_payload(payload) == ["dir with space/x.md"]
 
 
+def test_changed_files_from_payload_unquoted_path_with_space() -> None:
+    # Regression: git diff emits paths-with-spaces UNQUOTED (it only
+    # C-style-quotes for control chars, quotes, backslashes, etc.). A
+    # spaced code path silently dropping out of the parsed set would let
+    # a docs-only gate match a mixed push and skip the code reviewers.
+    review = hook.RefReview(
+        ref=_ref(), base_sha="r" * 40, base_label="b",
+        head_sha="h" * 40, is_force_push=False, commit_log="",
+        diff="diff --git a/src/my file.py b/src/my file.py\n+x\n",
+        changed_lines=1,
+    )
+    payload = hook.ReviewPayload(reviews=[review], skipped=[])
+    assert _changed_files_from_payload(payload) == ["src/my file.py"]
+
+
+def test_changed_files_from_payload_unquoted_rename_with_spaces() -> None:
+    review = hook.RefReview(
+        ref=_ref(), base_sha="r" * 40, base_label="b",
+        head_sha="h" * 40, is_force_push=False, commit_log="",
+        diff="diff --git a/old name.py b/new name.py\nsimilarity index 100%\n",
+        changed_lines=0,
+    )
+    payload = hook.ReviewPayload(reviews=[review], skipped=[])
+    assert _changed_files_from_payload(payload) == [
+        "new name.py", "old name.py",
+    ]
+
+
+def test_select_personas_unquoted_spaced_code_path_blocks_docs_gate(
+    make_config,
+) -> None:
+    # End-to-end of the regression: a push touching docs AND a code file
+    # whose path has a space must NOT match a docs-only gate. Before the
+    # fix, the unquoted spaced path silently dropped from `changed`,
+    # leaving only the .md path and falsely firing the gate.
+    gate = ReviewerGate(name="docs-only", patterns=["*.md"], personas=["a"])
+    cfg = make_config(
+        enabled_personas=["a", "b"],
+        reviewer_gates=[gate],
+    )
+    review = hook.RefReview(
+        ref=_ref(), base_sha="r" * 40, base_label="b",
+        head_sha="h" * 40, is_force_push=False, commit_log="",
+        diff=(
+            "diff --git a/README.md b/README.md\n+x\n"
+            "diff --git a/src/my file.py b/src/my file.py\n+y\n"
+        ),
+        changed_lines=2,
+    )
+    payload = hook.ReviewPayload(reviews=[review], skipped=[])
+    personas, fired = _select_personas(payload, cfg)
+    assert fired is None
+    assert personas == ["a", "b"]
+
+
 def test_changed_files_from_payload_empty() -> None:
     payload = hook.ReviewPayload(reviews=[], skipped=[])
     assert _changed_files_from_payload(payload) == []

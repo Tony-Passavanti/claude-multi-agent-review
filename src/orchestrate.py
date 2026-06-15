@@ -163,14 +163,17 @@ def _dispatch_sequential(
 
 # --- reviewer gate selection ------------------------------------------------
 
-# Matches `diff --git a/<src> b/<dst>` headers. Paths containing spaces or
-# special chars are quoted by git; both forms are captured. Anchored to the
-# start of a line via re.MULTILINE in the caller.
+# Matches `diff --git a/<src> b/<dst>` headers. Quoted-form paths (used by
+# git when a path needs C-style escaping) and unquoted paths are both
+# captured. Unquoted paths can still contain literal spaces — git only
+# quotes for control chars, quotes, backslashes, etc. The non-greedy
+# `.+?` plus the `$` anchor lets the engine split unquoted "a/X b/Y" on
+# the trailing ` b/` even when X or Y contain spaces.
 _DIFF_GIT_LINE_RE = re.compile(
     r'^diff --git '
-    r'(?:"a/(?P<aq>.+?)"|a/(?P<au>\S+))'
+    r'(?:"a/(?P<aq>.+?)"|a/(?P<au>.+?))'
     r' '
-    r'(?:"b/(?P<bq>.+?)"|b/(?P<bu>\S+))$',
+    r'(?:"b/(?P<bq>.+?)"|b/(?P<bu>.+?))$',
     re.MULTILINE,
 )
 
