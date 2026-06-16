@@ -21,13 +21,16 @@ import pytest
 
 from src import hook
 from src.aggregate import Verdict
-from src.config import Config
+from src.config import Config, ReviewerGate
 from src.orchestrate import (
+    _changed_files_from_payload,
     _diff_size_meta_verdict,
+    _gate_covers_all,
     _is_within,
     _read_spec,
     _resolve_persona_path,
     _reviewer_crashed_verdict,
+    _select_personas,
     _synthetic_missing_persona_verdict,
     review_all,
 )
@@ -69,6 +72,23 @@ def _review(changed_lines: int = 5) -> hook.RefReview:
 
 def _payload(changed: int = 5) -> hook.ReviewPayload:
     return hook.ReviewPayload(reviews=[_review(changed_lines=changed)], skipped=[])
+
+
+def _payload_with_files(*paths: str) -> hook.ReviewPayload:
+    """Build a ReviewPayload whose changed_files are exactly these paths.
+
+    The diff text is also populated so downstream consumers that render
+    it (e.g. format_diff_payload) still get something meaningful, but
+    gate matching reads from `changed_files`.
+    """
+    diff = "".join(f"diff --git a/{p} b/{p}\n+x\n" for p in paths)
+    review = hook.RefReview(
+        ref=_ref(), base_sha="r" * 40, base_label="origin/x",
+        head_sha="h" * 40, is_force_push=False,
+        commit_log="", diff=diff, changed_lines=len(paths),
+        changed_files=list(paths),
+    )
+    return hook.ReviewPayload(reviews=[review], skipped=[])
 
 
 def _mock_reviewer(
@@ -455,3 +475,337 @@ def test_review_all_passes_spec_and_diff_to_reviewer(
     assert "diff --git" in received["diff_payload"]
     assert received["config"] is cfg
     assert callable(received["log"])  # orchestrator passes its lock-aware logger
+
+
+# --- changed-file extraction ----------------------------------------------
+
+def test_changed_files_from_payload_reads_changed_files_field() -> None:
+    payload = _payload_with_files("src/foo.py", "docs/readme.md")
+    assert _changed_files_from_payload(payload) == [
+        "docs/readme.md", "src/foo.py",
+    ]
+
+
+def test_changed_files_from_payload_dedups_across_refs() -> None:
+    r1 = hook.RefReview(
+        ref=_ref(), base_sha="r" * 40, base_label="b",
+        head_sha="h" * 40, is_force_push=False, commit_log="",
+        diff="", changed_lines=0,
+        changed_files=["src/x.py", "src/y.py"],
+    )
+    r2 = hook.RefReview(
+        ref=_ref(), base_sha="r" * 40, base_label="b",
+        head_sha="h" * 40, is_force_push=False, commit_log="",
+        diff="", changed_lines=0,
+        changed_files=["src/y.py", "src/z.py"],
+    )
+    payload = hook.ReviewPayload(reviews=[r1, r2], skipped=[])
+    assert _changed_files_from_payload(payload) == [
+        "src/x.py", "src/y.py", "src/z.py",
+    ]
+
+
+def test_changed_files_from_payload_rename_includes_both_sides() -> None:
+    # Renames must surface BOTH the old and new path so a gate
+    # patterned on the source (e.g. `src/*` when a file is moved out of
+    # src/) still fires. `hook._diff_changed_files` uses
+    # `--no-renames` to make rename detection emit delete+add — both
+    # paths appear separately in the resulting `changed_files`.
+    review = hook.RefReview(
+        ref=_ref(), base_sha="r" * 40, base_label="b",
+        head_sha="h" * 40, is_force_push=False, commit_log="",
+        diff="", changed_lines=0,
+        changed_files=["lib/foo.py", "src/foo.py"],
+    )
+    payload = hook.ReviewPayload(reviews=[review], skipped=[])
+    assert _changed_files_from_payload(payload) == [
+        "lib/foo.py", "src/foo.py",
+    ]
+
+
+def test_select_personas_adversarial_path_with_b_slash_blocks_gate(
+    make_config,
+) -> None:
+    # Regression for the diff-header parsing ambiguity: an adversarial
+    # path like `README.md b/docs/evil.py` (top-level dir literally named
+    # `README.md b`, file `evil.py` under `docs/`) is valid POSIX and
+    # `git diff` emits its header as
+    #   diff --git a/README.md b/docs/evil.py b/README.md b/docs/evil.py
+    # The old regex parser would split on the first ` b/`, recovering
+    # `README.md` and `docs/evil.py b/...` — both of which match a
+    # docs-only gate (`*.md` and `docs/*`), letting a `.py` change skip
+    # security/correctness review. Now that `changed_files` comes from
+    # `git diff --name-only -z`, the canonical path is preserved and the
+    # gate correctly does not fire.
+    gate = ReviewerGate(
+        name="docs-only", patterns=["*.md", "docs/*"], personas=["a"],
+    )
+    cfg = make_config(
+        enabled_personas=["a", "b"],
+        reviewer_gates=[gate],
+    )
+    payload = _payload_with_files("README.md b/docs/evil.py")
+    personas, fired = _select_personas(payload, cfg)
+    assert fired is None
+    assert personas == ["a", "b"]
+
+
+def test_changed_files_from_payload_empty() -> None:
+    payload = hook.ReviewPayload(reviews=[], skipped=[])
+    assert _changed_files_from_payload(payload) == []
+
+
+# --- _gate_covers_all -----------------------------------------------------
+
+def test_gate_covers_all_true_when_every_file_matches() -> None:
+    gate = ReviewerGate(name="docs", patterns=["*.md"], personas=["a"])
+    assert _gate_covers_all(gate, ["README.md", "docs/x.md"]) is True
+
+
+def test_gate_covers_all_false_when_one_file_unmatched() -> None:
+    # All-or-nothing: a single unmatched file blocks the gate.
+    gate = ReviewerGate(name="docs", patterns=["*.md"], personas=["a"])
+    assert _gate_covers_all(gate, ["README.md", "src/main.py"]) is False
+
+
+def test_gate_covers_all_multiple_patterns_union() -> None:
+    gate = ReviewerGate(
+        name="docs", patterns=["*.md", "*.txt"], personas=["a"],
+    )
+    assert _gate_covers_all(gate, ["a.md", "NOTES.txt"]) is True
+
+
+# --- _select_personas -----------------------------------------------------
+
+def test_select_personas_no_gates_configured(make_config) -> None:
+    cfg = make_config(enabled_personas=["a", "b", "c"])
+    payload = _payload_with_files("anything.py")
+    personas, gate = _select_personas(payload, cfg)
+    assert personas == ["a", "b", "c"]
+    assert gate is None
+
+
+def test_select_personas_gate_matches_narrows_subset(make_config) -> None:
+    gate = ReviewerGate(name="docs", patterns=["*.md"], personas=["a", "c"])
+    cfg = make_config(
+        enabled_personas=["a", "b", "c"],
+        reviewer_gates=[gate],
+    )
+    payload = _payload_with_files("README.md", "docs/x.md")
+    personas, fired = _select_personas(payload, cfg)
+    assert personas == ["a", "c"]
+    assert fired is gate
+
+
+def test_select_personas_mixed_content_skips_all_gates(make_config) -> None:
+    # Even one non-matching file means the gate does not apply — the user
+    # gets the full enabled set rather than a misleading narrowed review.
+    gate = ReviewerGate(name="docs", patterns=["*.md"], personas=["a"])
+    cfg = make_config(
+        enabled_personas=["a", "b"],
+        reviewer_gates=[gate],
+    )
+    payload = _payload_with_files("docs/x.md", "src/foo.py")
+    personas, fired = _select_personas(payload, cfg)
+    assert personas == ["a", "b"]
+    assert fired is None
+
+
+def test_select_personas_first_matching_gate_wins(make_config) -> None:
+    g1 = ReviewerGate(name="docs", patterns=["*.md"], personas=["a"])
+    g2 = ReviewerGate(name="catchall", patterns=["*"], personas=["b"])
+    cfg = make_config(
+        enabled_personas=["a", "b"],
+        reviewer_gates=[g1, g2],
+    )
+    payload = _payload_with_files("README.md")
+    personas, fired = _select_personas(payload, cfg)
+    assert fired is g1
+    assert personas == ["a"]
+
+
+def test_select_personas_intersects_with_enabled(make_config) -> None:
+    # A gate cannot resurrect a globally disabled persona.
+    gate = ReviewerGate(
+        name="docs", patterns=["*.md"],
+        personas=["a", "disabled_one"],
+    )
+    cfg = make_config(
+        enabled_personas=["a", "b"],
+        reviewer_gates=[gate],
+    )
+    payload = _payload_with_files("README.md")
+    personas, fired = _select_personas(payload, cfg)
+    assert fired is gate
+    assert personas == ["a"]
+
+
+def test_select_personas_preserves_enabled_order(make_config) -> None:
+    # Selected subset is iterated in `enabled_personas` order, not in
+    # the gate's `personas` order — keeps streaming output stable.
+    gate = ReviewerGate(
+        name="docs", patterns=["*.md"], personas=["c", "a"],
+    )
+    cfg = make_config(
+        enabled_personas=["a", "b", "c"],
+        reviewer_gates=[gate],
+    )
+    payload = _payload_with_files("README.md")
+    personas, _ = _select_personas(payload, cfg)
+    assert personas == ["a", "c"]
+
+
+def test_select_personas_empty_intersection_falls_back_to_full_set(
+    make_config, capsys,
+) -> None:
+    # Misconfig safeguard: a gate whose `personas` share nothing with
+    # `enabled_personas` (e.g. user disabled or renamed a persona) must
+    # NOT silently fire and dispatch zero reviewers — that would let
+    # `aggregate([])` allow the push unreviewed. Treat as not-matched.
+    gate = ReviewerGate(
+        name="stale", patterns=["*.md"], personas=["disabled_one"],
+    )
+    cfg = make_config(
+        enabled_personas=["a", "b"],
+        reviewer_gates=[gate],
+    )
+    payload = _payload_with_files("README.md")
+    personas, fired = _select_personas(payload, cfg)
+    assert fired is None
+    assert personas == ["a", "b"]
+    err = capsys.readouterr().err
+    assert "stale" in err
+    assert "enabled_personas" in err
+
+
+def test_select_personas_empty_intersection_continues_to_next_gate(
+    make_config, capsys,
+) -> None:
+    # When the first matching gate has an empty intersection, the next
+    # gate in order should still get a chance to fire.
+    g1 = ReviewerGate(
+        name="stale", patterns=["*.md"], personas=["disabled_one"],
+    )
+    g2 = ReviewerGate(name="docs", patterns=["*.md"], personas=["a"])
+    cfg = make_config(
+        enabled_personas=["a", "b"],
+        reviewer_gates=[g1, g2],
+    )
+    payload = _payload_with_files("README.md")
+    personas, fired = _select_personas(payload, cfg)
+    assert fired is g2
+    assert personas == ["a"]
+
+
+def test_select_personas_empty_payload_falls_back_to_enabled(
+    make_config,
+) -> None:
+    gate = ReviewerGate(name="docs", patterns=["*.md"], personas=["a"])
+    cfg = make_config(
+        enabled_personas=["a", "b"],
+        reviewer_gates=[gate],
+    )
+    payload = hook.ReviewPayload(reviews=[], skipped=[])
+    personas, fired = _select_personas(payload, cfg)
+    assert personas == ["a", "b"]
+    assert fired is None
+
+
+# --- review_all with reviewer gates --------------------------------------
+
+def test_review_all_gate_narrows_dispatch(
+    make_persona, make_config,
+) -> None:
+    for name in ("spec_conformance", "agent_drift", "architecture"):
+        make_persona(name)
+    gate = ReviewerGate(
+        name="docs-only",
+        patterns=["*.md"],
+        personas=["spec_conformance", "agent_drift"],
+    )
+    cfg = make_config(
+        enabled_personas=["spec_conformance", "architecture", "agent_drift"],
+        reviewer_gates=[gate],
+    )
+    verdicts = review_all(
+        _payload_with_files("README.md", "docs/guide.md"),
+        cfg, reviewer_fn=_mock_reviewer,
+    )
+    assert {v.agent_name for v in verdicts} == {
+        "spec_conformance", "agent_drift",
+    }
+
+
+def test_review_all_no_gate_match_runs_full_set(
+    make_persona, make_config,
+) -> None:
+    make_persona("a")
+    make_persona("b")
+    gate = ReviewerGate(name="docs", patterns=["*.md"], personas=["a"])
+    cfg = make_config(
+        enabled_personas=["a", "b"],
+        reviewer_gates=[gate],
+    )
+    verdicts = review_all(
+        _payload_with_files("src/foo.py"),
+        cfg, reviewer_fn=_mock_reviewer,
+    )
+    assert {v.agent_name for v in verdicts} == {"a", "b"}
+
+
+def test_review_all_header_announces_matched_gate(
+    make_persona, make_config, capsys,
+) -> None:
+    make_persona("a")
+    gate = ReviewerGate(name="docs-only", patterns=["*.md"], personas=["a"])
+    cfg = make_config(
+        enabled_personas=["a", "b"],  # "b" intentionally has no file
+        reviewer_gates=[gate],
+    )
+    review_all(
+        _payload_with_files("README.md"),
+        cfg, reviewer_fn=_mock_reviewer,
+    )
+    err = capsys.readouterr().err
+    assert "docs-only" in err
+    assert "1 of 2" in err
+
+
+def test_review_all_header_announces_no_gate_matched(
+    make_persona, make_config, capsys,
+) -> None:
+    make_persona("a")
+    gate = ReviewerGate(name="docs-only", patterns=["*.md"], personas=["a"])
+    cfg = make_config(
+        enabled_personas=["a"],
+        reviewer_gates=[gate],
+    )
+    review_all(
+        _payload_with_files("src/foo.py"),
+        cfg, reviewer_fn=_mock_reviewer,
+    )
+    err = capsys.readouterr().err
+    assert "no gate matched" in err
+
+
+def test_review_all_gate_skipped_personas_are_not_invoked(
+    make_persona, make_config,
+) -> None:
+    # Verify the gated-out persona's reviewer_fn is NOT called — the
+    # whole point of the feature is to save token cost.
+    make_persona("kept")
+    make_persona("skipped")
+    gate = ReviewerGate(name="docs", patterns=["*.md"], personas=["kept"])
+    cfg = make_config(
+        enabled_personas=["kept", "skipped"],
+        reviewer_gates=[gate],
+    )
+    called: list[str] = []
+    def tracking_reviewer(**kwargs):
+        called.append(kwargs["persona_name"])
+        return _verdict(kwargs["persona_name"])
+    review_all(
+        _payload_with_files("README.md"),
+        cfg, reviewer_fn=tracking_reviewer,
+    )
+    assert called == ["kept"]

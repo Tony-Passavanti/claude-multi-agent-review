@@ -3,12 +3,16 @@
 Covers the pure parsers (is_zero_sha, parse_stdin), the payload formatter
 (format_diff_payload), and the derived properties on RefUpdate /
 ReviewPayload. The git-touching helpers (build_payload, _git, etc.) are
-exercised in the integration tests.
+exercised in the integration tests, except where a regression-prone
+detail (e.g. rename semantics on the gate-feeding path) needs targeted
+coverage and is included here.
 """
 
 from __future__ import annotations
 
 import io
+import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -17,6 +21,7 @@ from src.hook import (
     RefReview,
     RefUpdate,
     ReviewPayload,
+    _diff_changed_files,
     format_diff_payload,
     is_zero_sha,
     parse_stdin,
@@ -269,3 +274,115 @@ def test_format_diff_payload_multiple_refs_separated() -> None:
     assert "=== ref: refs/heads/b ===" in text
     # Multi-ref payloads are separated by blank lines.
     assert "\n\n" in text
+
+
+# --- _diff_changed_files (real git plumbing) -------------------------------
+
+def _init_repo(path: Path) -> None:
+    """Initialize a tmp git repo with deterministic identity for tests.
+
+    `diff.renames = true` is deliberately enabled so the rename test
+    actually exercises the contract: `_diff_changed_files` MUST pass
+    `--no-renames` itself rather than relying on the user's config to
+    be permissive. If the helper ever drops `--no-renames`, the rename
+    test will fail.
+    """
+    path.mkdir(parents=True, exist_ok=True)
+    for args in (
+        ["git", "init", "-q"],
+        ["git", "config", "user.email", "t@t"],
+        ["git", "config", "user.name", "t"],
+        # See docstring: enabled, not disabled — verifies the impl's
+        # `--no-renames` flag overrides repo-level rename detection.
+        ["git", "config", "diff.renames", "true"],
+    ):
+        subprocess.run(args, cwd=path, check=True, capture_output=True)
+
+
+def _git_commit(path: Path, message: str) -> str:
+    subprocess.run(
+        ["git", "commit", "-q", "-m", message],
+        cwd=path, check=True, capture_output=True,
+    )
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=path, check=True, capture_output=True, text=True,
+    )
+    return result.stdout.strip()
+
+
+def test_diff_changed_files_basic_modify(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    (tmp_path / "a.txt").write_text("hello\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "."], cwd=tmp_path, check=True, capture_output=True,
+    )
+    base = _git_commit(tmp_path, "init")
+    (tmp_path / "a.txt").write_text("hello world\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "."], cwd=tmp_path, check=True, capture_output=True,
+    )
+    head = _git_commit(tmp_path, "edit")
+    assert _diff_changed_files(base, head, tmp_path) == ["a.txt"]
+
+
+def test_diff_changed_files_rename_emits_both_paths(tmp_path: Path) -> None:
+    # Regression: when a gate's patterns match the source path of a
+    # rename (e.g. `src/*` when a file moves out of src/), the source
+    # path MUST appear in changed_files so the gate's all-or-nothing
+    # check sees it. Default git rename detection only emits the
+    # destination; `--no-renames` in `_diff_changed_files` makes the
+    # rename appear as delete-old + add-new so both paths surface.
+    _init_repo(tmp_path)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "foo.py").write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "."], cwd=tmp_path, check=True, capture_output=True,
+    )
+    base = _git_commit(tmp_path, "init")
+    (tmp_path / "lib").mkdir()
+    subprocess.run(
+        ["git", "mv", "src/foo.py", "lib/foo.py"],
+        cwd=tmp_path, check=True, capture_output=True,
+    )
+    head = _git_commit(tmp_path, "move")
+    files = _diff_changed_files(base, head, tmp_path)
+    assert sorted(files) == ["lib/foo.py", "src/foo.py"]
+
+
+def test_diff_changed_files_rename_with_spaces_in_both_paths(
+    tmp_path: Path,
+) -> None:
+    # Coverage gap from the previous push (called out by the tests
+    # reviewer): a rename where BOTH the source and destination contain
+    # spaces in their basenames. NUL-separated output should pass them
+    # through verbatim with `--no-renames` emitting both as separate
+    # entries.
+    _init_repo(tmp_path)
+    (tmp_path / "old name.py").write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "."], cwd=tmp_path, check=True, capture_output=True,
+    )
+    base = _git_commit(tmp_path, "init")
+    subprocess.run(
+        ["git", "mv", "old name.py", "new name.py"],
+        cwd=tmp_path, check=True, capture_output=True,
+    )
+    head = _git_commit(tmp_path, "rename with spaces")
+    files = _diff_changed_files(base, head, tmp_path)
+    assert sorted(files) == ["new name.py", "old name.py"]
+
+
+def test_diff_changed_files_path_with_space(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    (tmp_path / "weird file.txt").write_text("a\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "."], cwd=tmp_path, check=True, capture_output=True,
+    )
+    base = _git_commit(tmp_path, "init")
+    (tmp_path / "weird file.txt").write_text("b\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "."], cwd=tmp_path, check=True, capture_output=True,
+    )
+    head = _git_commit(tmp_path, "edit")
+    assert _diff_changed_files(base, head, tmp_path) == ["weird file.txt"]

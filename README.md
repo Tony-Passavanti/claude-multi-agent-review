@@ -201,10 +201,49 @@ treat_reviewer_failure_as = "warn"
 # Soft cap on diff size. Exceeding this emits a meta-WARN but the full
 # diff still goes to every reviewer.
 max_diff_lines = 5000
+
+# Optional: narrow the reviewer set when every changed file matches a
+# gate. Ships empty (opt-in). See "Reviewer gates" below.
+reviewer_gates = []
 ```
 
 See [`config/default.toml`](config/default.toml) for the complete
 surface, including retry counts, timeouts, and the bypass env var name.
+
+### Reviewer gates (opt-in cost optimization)
+
+For pushes that touch only docs, only tests, or only config files,
+several reviewers tend to have nothing meaningful to find — they PASS
+quickly with similar boilerplate. Reviewer gates let you skip those
+reviewers on file-type-homogeneous pushes:
+
+```toml
+[[reviewer_gates]]
+name = "docs-only"
+patterns = ["*.md", "docs/*", "*.txt"]
+personas = ["spec_conformance", "agent_drift"]
+
+[[reviewer_gates]]
+name = "tests-only"
+patterns = ["tests/*"]
+personas = ["spec_conformance", "tests", "agent_drift", "correctness"]
+```
+
+Behavior:
+
+- A gate fires only when **every** changed file in the push matches at
+  least one of its patterns (all-or-nothing). One stray code file in a
+  docs-heavy push → no gate fires, the full enabled set runs.
+- The first matching gate wins. Its `personas` are intersected with
+  `enabled_personas` — a gate cannot resurrect a globally disabled
+  persona, and an empty intersection is treated as not-matched.
+- Patterns use `fnmatch` syntax. Note that `*` matches path separators
+  too, so `*.md` matches `docs/sub/x.md` and `docs/*` matches files at
+  any depth under `docs/`.
+- Ships empty (`reviewer_gates = []`). Add gates in your repo-local
+  `.claude-multi-agent-review.toml` once you trust the patterns.
+- The streaming header announces which gate matched (or "no gate
+  matched") so you always see what ran.
 
 To override a shipped persona's prompt, drop your own
 `<name>.md` into `.claude-multi-agent-review/personas/` in your repo.

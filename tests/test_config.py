@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from src.config import Config, _config_from_dict, load
+from src.config import Config, ReviewerGate, _config_from_dict, load
 
 
 # --- _config_from_dict happy path ------------------------------------------
@@ -263,6 +263,104 @@ def test_load_no_repo_local_uses_defaults_only(tmp_path: Path) -> None:
     cfg = load(install_root=tmp_path, repo_root=tmp_path)
     assert cfg.max_diff_lines == 5000
 
+
+# --- reviewer_gates validation ---------------------------------------------
+
+def test_reviewer_gates_default_empty_when_absent() -> None:
+    # `_good_data()` deliberately omits reviewer_gates — the validator
+    # treats it as optional and defaults to an empty list.
+    cfg = _from_dict(_good_data())
+    assert cfg.reviewer_gates == []
+
+
+def test_reviewer_gates_parsed_into_dataclasses() -> None:
+    data = _good_data()
+    data["reviewer_gates"] = [
+        {"name": "docs", "patterns": ["*.md"], "personas": ["a", "b"]},
+        {"name": "tests", "patterns": ["tests/*"], "personas": ["a"]},
+    ]
+    cfg = _from_dict(data)
+    assert len(cfg.reviewer_gates) == 2
+    assert isinstance(cfg.reviewer_gates[0], ReviewerGate)
+    assert cfg.reviewer_gates[0].name == "docs"
+    assert cfg.reviewer_gates[0].patterns == ["*.md"]
+    assert cfg.reviewer_gates[0].personas == ["a", "b"]
+    assert cfg.reviewer_gates[1].name == "tests"
+
+
+def test_reviewer_gates_not_list_rejected() -> None:
+    data = _good_data()
+    data["reviewer_gates"] = "docs"  # type: ignore[assignment]
+    with pytest.raises(ValueError, match="reviewer_gates.*expected list"):
+        _from_dict(data)
+
+
+def test_reviewer_gates_entry_not_table_rejected() -> None:
+    data = _good_data()
+    data["reviewer_gates"] = ["just a string"]
+    with pytest.raises(ValueError, match=r"reviewer_gates\[0\].*expected table"):
+        _from_dict(data)
+
+
+def test_reviewer_gates_missing_required_key_rejected() -> None:
+    data = _good_data()
+    data["reviewer_gates"] = [{"name": "x", "patterns": ["*"]}]  # no personas
+    with pytest.raises(ValueError, match="personas"):
+        _from_dict(data)
+
+
+def test_reviewer_gates_empty_patterns_rejected() -> None:
+    data = _good_data()
+    data["reviewer_gates"] = [
+        {"name": "x", "patterns": [], "personas": ["a"]},
+    ]
+    with pytest.raises(ValueError, match=r"patterns.*not be empty"):
+        _from_dict(data)
+
+
+def test_reviewer_gates_empty_personas_rejected() -> None:
+    data = _good_data()
+    data["reviewer_gates"] = [
+        {"name": "x", "patterns": ["*"], "personas": []},
+    ]
+    with pytest.raises(ValueError, match=r"personas.*not be empty"):
+        _from_dict(data)
+
+
+def test_reviewer_gates_non_string_pattern_rejected() -> None:
+    data = _good_data()
+    data["reviewer_gates"] = [
+        {"name": "x", "patterns": [42], "personas": ["a"]},
+    ]
+    with pytest.raises(ValueError, match=r"patterns\[0\]"):
+        _from_dict(data)
+
+
+def test_reviewer_gates_wrong_field_type_rejected() -> None:
+    data = _good_data()
+    data["reviewer_gates"] = [
+        {"name": "x", "patterns": "not a list", "personas": ["a"]},
+    ]
+    with pytest.raises(ValueError, match="patterns.*expected list"):
+        _from_dict(data)
+
+
+def test_reviewer_gates_unknown_inner_key_tolerated() -> None:
+    # Forward-compat: a future hook version may add fields to gate
+    # entries (e.g. "notes"). An older validator must not crash on them.
+    data = _good_data()
+    data["reviewer_gates"] = [
+        {
+            "name": "x", "patterns": ["*"], "personas": ["a"],
+            "notes": "added in v2",
+        },
+    ]
+    cfg = _from_dict(data)
+    assert len(cfg.reviewer_gates) == 1
+    assert cfg.reviewer_gates[0].name == "x"
+
+
+# --- load() / shipped defaults integration --------------------------------
 
 def test_load_repo_local_forward_compat_keys(tmp_path: Path) -> None:
     _write_shipped_default(tmp_path)

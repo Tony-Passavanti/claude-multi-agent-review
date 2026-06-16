@@ -66,6 +66,13 @@ class RefReview:
     commit_log: str        # `git log --oneline <base>..<head>`
     diff: str              # `git diff <base> <head>`
     changed_lines: int
+    # Canonical list of changed file paths from `git diff --name-only -z`.
+    # Defaulted so older positional callers (tests, third-party) keep
+    # working, and so the public dataclass signature stays additive
+    # (api.public-symbols). Consumers that need to match paths (e.g.
+    # reviewer gates) MUST use this rather than parsing `diff` — diff-
+    # header parsing is ambiguous for paths containing literal ` b/`.
+    changed_files: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -181,6 +188,33 @@ def _diff_stats_changed_lines(base: str, head: str, repo_root: Path) -> int:
     return total
 
 
+def _diff_changed_files(base: str, head: str, repo_root: Path) -> list[str]:
+    """Unambiguous list of changed paths via `git diff --name-only -z`.
+
+    Uses NUL termination so paths with spaces, embedded ` b/`, or other
+    characters that would render diff-header parsing ambiguous round-trip
+    safely. Empty / missing output → empty list (treat as no changes).
+
+    `--no-renames` disables rename detection so a rename appears as
+    delete-old + add-new (both paths emitted) rather than only the
+    destination. This matches the old regex parser's behavior of
+    capturing both sides of a `diff --git a/<src> b/<dst>` rename
+    header, and keeps gates that pattern-match on the source path
+    firing correctly when a file is moved into or out of a guarded
+    directory.
+    """
+    proc = _git(
+        "diff", "--name-only", "--no-renames", "-z",
+        f"{base}..{head}",
+        repo_root=repo_root, check=False,
+    )
+    if proc.returncode != 0 or not proc.stdout:
+        return []
+    # `-z` outputs each path followed by NUL; trailing NUL after the last
+    # path is normal, so strip it before split to avoid an empty tail.
+    return [p for p in proc.stdout.rstrip("\x00").split("\x00") if p]
+
+
 # --- per-ref review construction --------------------------------------------
 
 def _build_ref_review(
@@ -241,6 +275,7 @@ def _build_ref_review(
     commit_log = log_proc.stdout if log_proc.returncode == 0 else ""
 
     changed_lines = _diff_stats_changed_lines(base_sha, ref.local_sha, repo_root)
+    changed_files = _diff_changed_files(base_sha, ref.local_sha, repo_root)
 
     return RefReview(
         ref=ref,
@@ -251,6 +286,7 @@ def _build_ref_review(
         commit_log=commit_log,
         diff=diff_text,
         changed_lines=changed_lines,
+        changed_files=changed_files,
     )
 
 

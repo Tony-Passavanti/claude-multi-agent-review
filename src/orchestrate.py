@@ -18,6 +18,7 @@ in-flight progress UI.
 
 from __future__ import annotations
 
+import fnmatch
 import sys
 import threading
 import time
@@ -27,7 +28,7 @@ from typing import Callable, TextIO
 
 from . import hook, reviewer
 from .aggregate import Verdict
-from .config import Config
+from .config import Config, ReviewerGate
 
 # Width of the verdict column in the streaming line. Max of PASS/WARN/FAIL.
 _VERDICT_W = 4
@@ -49,11 +50,13 @@ def review_all(
     spec = _read_spec(config)  # raises FileNotFoundError; hook.run catches it
     diff_text = hook.format_diff_payload(payload)
 
+    active_personas, gate = _select_personas(payload, config)
+
     persona_jobs = [(name, _resolve_persona_path(name, config))
-                    for name in config.enabled_personas]
+                    for name in active_personas]
 
     # Header first so the user has context before any synthetic verdicts.
-    _stream_header(persona_jobs, payload, config)
+    _stream_header(persona_jobs, payload, config, gate=gate)
 
     verdicts: list[Verdict] = []
 
@@ -155,6 +158,82 @@ def _dispatch_sequential(
         _stream_verdict(v, spinner=spinner)
         verdicts.append(v)
     return verdicts
+
+
+# --- reviewer gate selection ------------------------------------------------
+
+def _changed_files_from_payload(payload: hook.ReviewPayload) -> list[str]:
+    """Unique sorted list of changed paths across all refs in the payload.
+
+    Reads from each `RefReview.changed_files`, which `hook._build_ref_review`
+    populates from `git diff --name-only -z` — unambiguous for paths
+    containing spaces, embedded ` b/`, or other characters that would
+    make diff-header parsing ambiguous.
+    """
+    paths: set[str] = set()
+    for review in payload.reviews:
+        paths.update(review.changed_files)
+    return sorted(paths)
+
+
+def _select_personas(
+    payload: hook.ReviewPayload,
+    config: Config,
+) -> tuple[list[str], ReviewerGate | None]:
+    """Decide which personas to run based on `reviewer_gates`.
+
+    A gate fires only when every changed file matches at least one of its
+    patterns. The first matching gate wins; its `personas` list is
+    intersected with `enabled_personas` (preserving enabled order) so a
+    gate cannot resurrect a globally disabled persona. If no gate fires
+    or no gates are configured, all enabled personas run.
+
+    Empty-intersection safeguard: a gate whose `personas` share nothing
+    with `enabled_personas` (e.g. after a persona was disabled or
+    renamed) is treated as not-matched and we continue to the next gate.
+    Without this, an empty selection would dispatch zero reviewers and
+    `aggregate([])` would allow the push unreviewed. The user gets a
+    stderr warning so the misconfig surfaces.
+
+    Returns (active personas, matched gate or None).
+    """
+    if not config.reviewer_gates:
+        return list(config.enabled_personas), None
+
+    changed = _changed_files_from_payload(payload)
+    if not changed:
+        # No files to match against — fall back to running everything
+        # rather than guess at intent on an empty change set.
+        return list(config.enabled_personas), None
+
+    for gate in config.reviewer_gates:
+        if not _gate_covers_all(gate, changed):
+            continue
+        gate_set = set(gate.personas)
+        selected = [p for p in config.enabled_personas if p in gate_set]
+        if not selected:
+            _stream_line(
+                f"claude-multi-agent-review: gate {gate.name!r} matched but "
+                f"its personas {gate.personas} share nothing with "
+                f"enabled_personas; treating as not-matched"
+            )
+            continue
+        return selected, gate
+
+    return list(config.enabled_personas), None
+
+
+def _gate_covers_all(gate: ReviewerGate, files: list[str]) -> bool:
+    """True iff every file matches at least one of the gate's patterns.
+
+    Uses `fnmatch.fnmatchcase` for case-sensitive, OS-agnostic matching
+    (the OS-aware `fnmatch.fnmatch` would normcase on Windows, which
+    changes pattern semantics across platforms).
+    """
+    return all(
+        any(fnmatch.fnmatchcase(f, p) for p in gate.patterns)
+        for f in files
+    )
 
 
 # --- persona / spec resolution ----------------------------------------------
@@ -274,6 +353,8 @@ def _stream_header(
     persona_jobs: list[tuple[str, Path | None]],
     payload: hook.ReviewPayload,
     config: Config,
+    *,
+    gate: ReviewerGate | None = None,
 ) -> None:
     with _stream_lock:
         ref_count = len(payload.reviews)
@@ -291,6 +372,21 @@ def _stream_header(
             file=sys.stderr,
             flush=True,
         )
+        if gate is not None:
+            total_enabled = len(config.enabled_personas)
+            print(
+                f"claude-multi-agent-review: gate {gate.name!r} matched; "
+                f"running {n} of {total_enabled} reviewers ({names})",
+                file=sys.stderr,
+                flush=True,
+            )
+        elif config.reviewer_gates:
+            print(
+                "claude-multi-agent-review: no gate matched, running all "
+                "enabled personas",
+                file=sys.stderr,
+                flush=True,
+            )
 
 
 def _stream_verdict(v: Verdict, spinner: "_Spinner | None" = None) -> None:

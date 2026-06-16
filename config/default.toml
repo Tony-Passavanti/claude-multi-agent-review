@@ -68,3 +68,31 @@ reviewer_retries = 1
 #   "fail" - synthetic FAIL verdict, push blocked (fail-closed; recommended for
 #            high-stakes repos where missing a review is unacceptable)
 treat_reviewer_failure_as = "warn"
+
+# Optional: narrow the reviewer set when every changed file matches a gate.
+#
+# Each gate is `name`, `patterns`, `personas`. A gate fires only when
+# EVERY changed file in the push matches at least one of its patterns
+# (all-or-nothing) — mixed-content pushes skip all gates and run the
+# full enabled set. The first matching gate wins; its personas are
+# intersected with enabled_personas (a gate can never enable a persona
+# the user has globally disabled).
+#
+# Patterns use fnmatch syntax (`*`, `?`, `[seq]`). Note that `*` matches
+# path separators too: `*.md` matches `docs/x.md`, and `docs/*` matches
+# `docs/sub/x.md`. Use specific paths if you want tighter scoping.
+#
+# Ships empty so behavior is opt-in. Add gates in your repo-local
+# .claude-multi-agent-review.toml once you trust the patterns.
+#
+# Example (commented out — copy into your repo-local config):
+#   [[reviewer_gates]]
+#   name = "docs-only"
+#   patterns = ["*.md", "docs/*", "*.txt"]
+#   personas = ["spec_conformance", "agent_drift"]
+#
+#   [[reviewer_gates]]
+#   name = "tests-only"
+#   patterns = ["tests/*"]
+#   personas = ["spec_conformance", "tests", "agent_drift", "correctness"]
+reviewer_gates = []
