@@ -664,6 +664,48 @@ def test_select_personas_preserves_enabled_order(make_config) -> None:
     assert personas == ["a", "c"]
 
 
+def test_select_personas_empty_intersection_falls_back_to_full_set(
+    make_config, capsys,
+) -> None:
+    # Misconfig safeguard: a gate whose `personas` share nothing with
+    # `enabled_personas` (e.g. user disabled or renamed a persona) must
+    # NOT silently fire and dispatch zero reviewers — that would let
+    # `aggregate([])` allow the push unreviewed. Treat as not-matched.
+    gate = ReviewerGate(
+        name="stale", patterns=["*.md"], personas=["disabled_one"],
+    )
+    cfg = make_config(
+        enabled_personas=["a", "b"],
+        reviewer_gates=[gate],
+    )
+    payload = _payload_with_files("README.md")
+    personas, fired = _select_personas(payload, cfg)
+    assert fired is None
+    assert personas == ["a", "b"]
+    err = capsys.readouterr().err
+    assert "stale" in err
+    assert "enabled_personas" in err
+
+
+def test_select_personas_empty_intersection_continues_to_next_gate(
+    make_config, capsys,
+) -> None:
+    # When the first matching gate has an empty intersection, the next
+    # gate in order should still get a chance to fire.
+    g1 = ReviewerGate(
+        name="stale", patterns=["*.md"], personas=["disabled_one"],
+    )
+    g2 = ReviewerGate(name="docs", patterns=["*.md"], personas=["a"])
+    cfg = make_config(
+        enabled_personas=["a", "b"],
+        reviewer_gates=[g1, g2],
+    )
+    payload = _payload_with_files("README.md")
+    personas, fired = _select_personas(payload, cfg)
+    assert fired is g2
+    assert personas == ["a"]
+
+
 def test_select_personas_empty_payload_falls_back_to_enabled(
     make_config,
 ) -> None:

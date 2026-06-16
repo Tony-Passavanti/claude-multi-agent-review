@@ -209,6 +209,13 @@ def _select_personas(
     gate cannot resurrect a globally disabled persona. If no gate fires
     or no gates are configured, all enabled personas run.
 
+    Empty-intersection safeguard: a gate whose `personas` share nothing
+    with `enabled_personas` (e.g. after a persona was disabled or
+    renamed) is treated as not-matched and we continue to the next gate.
+    Without this, an empty selection would dispatch zero reviewers and
+    `aggregate([])` would allow the push unreviewed. The user gets a
+    stderr warning so the misconfig surfaces.
+
     Returns (active personas, matched gate or None).
     """
     if not config.reviewer_gates:
@@ -225,6 +232,13 @@ def _select_personas(
             continue
         gate_set = set(gate.personas)
         selected = [p for p in config.enabled_personas if p in gate_set]
+        if not selected:
+            _stream_line(
+                f"claude-multi-agent-review: gate {gate.name!r} matched but "
+                f"its personas {gate.personas} share nothing with "
+                f"enabled_personas; treating as not-matched"
+            )
+            continue
         return selected, gate
 
     return list(config.enabled_personas), None
