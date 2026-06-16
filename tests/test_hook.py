@@ -279,15 +279,21 @@ def test_format_diff_payload_multiple_refs_separated() -> None:
 # --- _diff_changed_files (real git plumbing) -------------------------------
 
 def _init_repo(path: Path) -> None:
-    """Initialize a tmp git repo with deterministic identity for tests."""
+    """Initialize a tmp git repo with deterministic identity for tests.
+
+    `diff.renames = true` is deliberately enabled so the rename test
+    actually exercises the contract: `_diff_changed_files` MUST pass
+    `--no-renames` itself rather than relying on the user's config to
+    be permissive. If the helper ever drops `--no-renames`, the rename
+    test will fail.
+    """
     path.mkdir(parents=True, exist_ok=True)
     for args in (
         ["git", "init", "-q"],
         ["git", "config", "user.email", "t@t"],
         ["git", "config", "user.name", "t"],
-        # Disable any global rename-detection config affecting -z output;
-        # the implementation should pass `--no-renames` itself, but
-        # belt-and-suspenders for CI environments with custom configs.
+        # See docstring: enabled, not disabled — verifies the impl's
+        # `--no-renames` flag overrides repo-level rename detection.
         ["git", "config", "diff.renames", "true"],
     ):
         subprocess.run(args, cwd=path, check=True, capture_output=True)
@@ -342,6 +348,29 @@ def test_diff_changed_files_rename_emits_both_paths(tmp_path: Path) -> None:
     head = _git_commit(tmp_path, "move")
     files = _diff_changed_files(base, head, tmp_path)
     assert sorted(files) == ["lib/foo.py", "src/foo.py"]
+
+
+def test_diff_changed_files_rename_with_spaces_in_both_paths(
+    tmp_path: Path,
+) -> None:
+    # Coverage gap from the previous push (called out by the tests
+    # reviewer): a rename where BOTH the source and destination contain
+    # spaces in their basenames. NUL-separated output should pass them
+    # through verbatim with `--no-renames` emitting both as separate
+    # entries.
+    _init_repo(tmp_path)
+    (tmp_path / "old name.py").write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "."], cwd=tmp_path, check=True, capture_output=True,
+    )
+    base = _git_commit(tmp_path, "init")
+    subprocess.run(
+        ["git", "mv", "old name.py", "new name.py"],
+        cwd=tmp_path, check=True, capture_output=True,
+    )
+    head = _git_commit(tmp_path, "rename with spaces")
+    files = _diff_changed_files(base, head, tmp_path)
+    assert sorted(files) == ["new name.py", "old name.py"]
 
 
 def test_diff_changed_files_path_with_space(tmp_path: Path) -> None:
