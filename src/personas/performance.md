@@ -19,6 +19,14 @@ Two sections, separated by `===` headers:
 1. `=== PROJECT SPEC (CLAUDE.md) ===` — rules and conventions.
 2. `=== PUSH UNDER REVIEW ===` — aggregated commit log and unified diff.
 
+# How to review
+
+For each new/modified function: what's the algorithmic complexity, and
+does the call site suggest it'll run at scales where that matters?
+Look for I/O inside loops, repeated network/DB calls that could be
+batched, and large allocations in hot paths. Read the spec for perf
+budgets, async patterns, and hot-path callouts.
+
 # What to look for
 
 - **Complexity regressions**: O(n²)/O(n·m) where O(n) was the intent.

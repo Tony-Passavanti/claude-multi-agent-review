@@ -15,6 +15,14 @@ Two sections, separated by `===` headers:
 1. `=== PROJECT SPEC (CLAUDE.md) ===` — rules and conventions.
 2. `=== PUSH UNDER REVIEW ===` — aggregated commit log and unified diff.
 
+# How to review
+
+Identify behavior changes (new functions, new branches, modified
+return values, changed error handling). For each, check whether the
+diff also adds or updates a test exercising it. Inspect changes to
+existing tests for deletions, skips, or weakening. Look for tests
+that don't actually assert, tautological mocks, and fixture rot.
+
 # What to look for
 
 - **New behavior without tests**: new public function, class, or

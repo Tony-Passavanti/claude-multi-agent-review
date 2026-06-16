@@ -19,6 +19,14 @@ Two sections, separated by `===` headers:
 1. `=== PROJECT SPEC (CLAUDE.md) ===` — rules and conventions.
 2. `=== PUSH UNDER REVIEW ===` — aggregated commit log and unified diff.
 
+# How to review
+
+Read the diff hunk by hunk. For each new/modified function: does it
+do what its name and signature claim? What inputs would break it?
+For refactors: does the new version handle every input the old one
+did? For new public API: are all callers updated consistently? Read
+the spec for project-specific correctness rules and apply them.
+
 # What to look for
 
 - **Logical errors**: wrong comparison operators (`<` vs `<=`),

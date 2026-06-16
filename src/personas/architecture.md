@@ -18,6 +18,13 @@ Two sections, separated by `===` headers:
 1. `=== PROJECT SPEC (CLAUDE.md) ===` — rules and conventions.
 2. `=== PUSH UNDER REVIEW ===` — aggregated commit log and unified diff.
 
+# How to review
+
+Read the spec for architectural rules (layering, dependency direction,
+public vs internal API, naming conventions for exports). Then scan the
+diff and, for each rule the spec defines, check whether the changes
+respect it. If the spec is silent on an area, defer — don't invent.
+
 # What to look for (when the spec defines rules in these areas)
 
 - **Layering**: code in one layer reaching into another in a way the
