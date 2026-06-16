@@ -505,6 +505,24 @@ def test_changed_files_from_payload_dedups_across_refs() -> None:
     ]
 
 
+def test_changed_files_from_payload_rename_includes_both_sides() -> None:
+    # Renames must surface BOTH the old and new path so a gate
+    # patterned on the source (e.g. `src/*` when a file is moved out of
+    # src/) still fires. `hook._diff_changed_files` uses
+    # `--no-renames` to make rename detection emit delete+add — both
+    # paths appear separately in the resulting `changed_files`.
+    review = hook.RefReview(
+        ref=_ref(), base_sha="r" * 40, base_label="b",
+        head_sha="h" * 40, is_force_push=False, commit_log="",
+        diff="", changed_lines=0,
+        changed_files=["lib/foo.py", "src/foo.py"],
+    )
+    payload = hook.ReviewPayload(reviews=[review], skipped=[])
+    assert _changed_files_from_payload(payload) == [
+        "lib/foo.py", "src/foo.py",
+    ]
+
+
 def test_select_personas_adversarial_path_with_b_slash_blocks_gate(
     make_config,
 ) -> None:

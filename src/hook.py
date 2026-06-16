@@ -194,9 +194,18 @@ def _diff_changed_files(base: str, head: str, repo_root: Path) -> list[str]:
     Uses NUL termination so paths with spaces, embedded ` b/`, or other
     characters that would render diff-header parsing ambiguous round-trip
     safely. Empty / missing output → empty list (treat as no changes).
+
+    `--no-renames` disables rename detection so a rename appears as
+    delete-old + add-new (both paths emitted) rather than only the
+    destination. This matches the old regex parser's behavior of
+    capturing both sides of a `diff --git a/<src> b/<dst>` rename
+    header, and keeps gates that pattern-match on the source path
+    firing correctly when a file is moved into or out of a guarded
+    directory.
     """
     proc = _git(
-        "diff", "--name-only", "-z", f"{base}..{head}",
+        "diff", "--name-only", "--no-renames", "-z",
+        f"{base}..{head}",
         repo_root=repo_root, check=False,
     )
     if proc.returncode != 0 or not proc.stdout:
