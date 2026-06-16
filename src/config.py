@@ -71,8 +71,12 @@ class Config:
     max_diff_lines: int
     install_root: Path
     repo_root: Path
-    reviewer_gates: list[ReviewerGate] = field(default_factory=list)
+    # `extra` stays in its original position to preserve the public
+    # positional constructor signature (`api.public-symbols`). New
+    # defaulted fields go AFTER it so existing callers passing `extra`
+    # positionally don't silently misbind.
     extra: dict[str, object] = field(default_factory=dict)
+    reviewer_gates: list[ReviewerGate] = field(default_factory=list)
 
 
 def load(*, install_root: Path, repo_root: Path) -> Config:
@@ -193,8 +197,8 @@ def _config_from_dict(
         max_diff_lines=data["max_diff_lines"],
         install_root=install_root,
         repo_root=repo_root,
-        reviewer_gates=reviewer_gates,
         extra=extra,
+        reviewer_gates=reviewer_gates,
     )
 
 
