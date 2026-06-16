@@ -75,12 +75,18 @@ def _payload(changed: int = 5) -> hook.ReviewPayload:
 
 
 def _payload_with_files(*paths: str) -> hook.ReviewPayload:
-    """Build a ReviewPayload whose diff names exactly these changed files."""
+    """Build a ReviewPayload whose changed_files are exactly these paths.
+
+    The diff text is also populated so downstream consumers that render
+    it (e.g. format_diff_payload) still get something meaningful, but
+    gate matching reads from `changed_files`.
+    """
     diff = "".join(f"diff --git a/{p} b/{p}\n+x\n" for p in paths)
     review = hook.RefReview(
         ref=_ref(), base_sha="r" * 40, base_label="origin/x",
         head_sha="h" * 40, is_force_push=False,
         commit_log="", diff=diff, changed_lines=len(paths),
+        changed_files=list(paths),
     )
     return hook.ReviewPayload(reviews=[review], skipped=[])
 
@@ -473,87 +479,54 @@ def test_review_all_passes_spec_and_diff_to_reviewer(
 
 # --- changed-file extraction ----------------------------------------------
 
-def test_changed_files_from_payload_multiple_refs() -> None:
+def test_changed_files_from_payload_reads_changed_files_field() -> None:
     payload = _payload_with_files("src/foo.py", "docs/readme.md")
     assert _changed_files_from_payload(payload) == [
         "docs/readme.md", "src/foo.py",
     ]
 
 
-def test_changed_files_from_payload_rename_includes_both_sides() -> None:
-    review = hook.RefReview(
+def test_changed_files_from_payload_dedups_across_refs() -> None:
+    r1 = hook.RefReview(
         ref=_ref(), base_sha="r" * 40, base_label="b",
         head_sha="h" * 40, is_force_push=False, commit_log="",
-        diff="diff --git a/old/name.py b/new/name.py\nsimilarity index 100%\n",
-        changed_lines=0,
+        diff="", changed_lines=0,
+        changed_files=["src/x.py", "src/y.py"],
     )
-    payload = hook.ReviewPayload(reviews=[review], skipped=[])
+    r2 = hook.RefReview(
+        ref=_ref(), base_sha="r" * 40, base_label="b",
+        head_sha="h" * 40, is_force_push=False, commit_log="",
+        diff="", changed_lines=0,
+        changed_files=["src/y.py", "src/z.py"],
+    )
+    payload = hook.ReviewPayload(reviews=[r1, r2], skipped=[])
     assert _changed_files_from_payload(payload) == [
-        "new/name.py", "old/name.py",
+        "src/x.py", "src/y.py", "src/z.py",
     ]
 
 
-def test_changed_files_from_payload_quoted_path_with_space() -> None:
-    review = hook.RefReview(
-        ref=_ref(), base_sha="r" * 40, base_label="b",
-        head_sha="h" * 40, is_force_push=False, commit_log="",
-        diff='diff --git "a/dir with space/x.md" "b/dir with space/x.md"\n',
-        changed_lines=0,
-    )
-    payload = hook.ReviewPayload(reviews=[review], skipped=[])
-    assert _changed_files_from_payload(payload) == ["dir with space/x.md"]
-
-
-def test_changed_files_from_payload_unquoted_path_with_space() -> None:
-    # Regression: git diff emits paths-with-spaces UNQUOTED (it only
-    # C-style-quotes for control chars, quotes, backslashes, etc.). A
-    # spaced code path silently dropping out of the parsed set would let
-    # a docs-only gate match a mixed push and skip the code reviewers.
-    review = hook.RefReview(
-        ref=_ref(), base_sha="r" * 40, base_label="b",
-        head_sha="h" * 40, is_force_push=False, commit_log="",
-        diff="diff --git a/src/my file.py b/src/my file.py\n+x\n",
-        changed_lines=1,
-    )
-    payload = hook.ReviewPayload(reviews=[review], skipped=[])
-    assert _changed_files_from_payload(payload) == ["src/my file.py"]
-
-
-def test_changed_files_from_payload_unquoted_rename_with_spaces() -> None:
-    review = hook.RefReview(
-        ref=_ref(), base_sha="r" * 40, base_label="b",
-        head_sha="h" * 40, is_force_push=False, commit_log="",
-        diff="diff --git a/old name.py b/new name.py\nsimilarity index 100%\n",
-        changed_lines=0,
-    )
-    payload = hook.ReviewPayload(reviews=[review], skipped=[])
-    assert _changed_files_from_payload(payload) == [
-        "new name.py", "old name.py",
-    ]
-
-
-def test_select_personas_unquoted_spaced_code_path_blocks_docs_gate(
+def test_select_personas_adversarial_path_with_b_slash_blocks_gate(
     make_config,
 ) -> None:
-    # End-to-end of the regression: a push touching docs AND a code file
-    # whose path has a space must NOT match a docs-only gate. Before the
-    # fix, the unquoted spaced path silently dropped from `changed`,
-    # leaving only the .md path and falsely firing the gate.
-    gate = ReviewerGate(name="docs-only", patterns=["*.md"], personas=["a"])
+    # Regression for the diff-header parsing ambiguity: an adversarial
+    # path like `README.md b/docs/evil.py` (top-level dir literally named
+    # `README.md b`, file `evil.py` under `docs/`) is valid POSIX and
+    # `git diff` emits its header as
+    #   diff --git a/README.md b/docs/evil.py b/README.md b/docs/evil.py
+    # The old regex parser would split on the first ` b/`, recovering
+    # `README.md` and `docs/evil.py b/...` — both of which match a
+    # docs-only gate (`*.md` and `docs/*`), letting a `.py` change skip
+    # security/correctness review. Now that `changed_files` comes from
+    # `git diff --name-only -z`, the canonical path is preserved and the
+    # gate correctly does not fire.
+    gate = ReviewerGate(
+        name="docs-only", patterns=["*.md", "docs/*"], personas=["a"],
+    )
     cfg = make_config(
         enabled_personas=["a", "b"],
         reviewer_gates=[gate],
     )
-    review = hook.RefReview(
-        ref=_ref(), base_sha="r" * 40, base_label="b",
-        head_sha="h" * 40, is_force_push=False, commit_log="",
-        diff=(
-            "diff --git a/README.md b/README.md\n+x\n"
-            "diff --git a/src/my file.py b/src/my file.py\n+y\n"
-        ),
-        changed_lines=2,
-    )
-    payload = hook.ReviewPayload(reviews=[review], skipped=[])
+    payload = _payload_with_files("README.md b/docs/evil.py")
     personas, fired = _select_personas(payload, cfg)
     assert fired is None
     assert personas == ["a", "b"]

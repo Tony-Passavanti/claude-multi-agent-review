@@ -19,7 +19,6 @@ in-flight progress UI.
 from __future__ import annotations
 
 import fnmatch
-import re
 import sys
 import threading
 import time
@@ -163,37 +162,17 @@ def _dispatch_sequential(
 
 # --- reviewer gate selection ------------------------------------------------
 
-# Matches `diff --git a/<src> b/<dst>` headers. Quoted-form paths (used by
-# git when a path needs C-style escaping) and unquoted paths are both
-# captured. Unquoted paths can still contain literal spaces — git only
-# quotes for control chars, quotes, backslashes, etc. The non-greedy
-# `.+?` plus the `$` anchor lets the engine split unquoted "a/X b/Y" on
-# the trailing ` b/` even when X or Y contain spaces.
-_DIFF_GIT_LINE_RE = re.compile(
-    r'^diff --git '
-    r'(?:"a/(?P<aq>.+?)"|a/(?P<au>.+?))'
-    r' '
-    r'(?:"b/(?P<bq>.+?)"|b/(?P<bu>.+?))$',
-    re.MULTILINE,
-)
-
-
 def _changed_files_from_payload(payload: hook.ReviewPayload) -> list[str]:
-    """Extract unique changed file paths from every ref diff in the payload.
+    """Unique sorted list of changed paths across all refs in the payload.
 
-    Both sides of a rename are included so a gate covering either the old
-    or new location applies. Paths are returned sorted for stable
-    iteration in tests.
+    Reads from each `RefReview.changed_files`, which `hook._build_ref_review`
+    populates from `git diff --name-only -z` — unambiguous for paths
+    containing spaces, embedded ` b/`, or other characters that would
+    make diff-header parsing ambiguous.
     """
     paths: set[str] = set()
     for review in payload.reviews:
-        for m in _DIFF_GIT_LINE_RE.finditer(review.diff):
-            a = m.group("aq") or m.group("au")
-            b = m.group("bq") or m.group("bu")
-            if a:
-                paths.add(a)
-            if b:
-                paths.add(b)
+        paths.update(review.changed_files)
     return sorted(paths)
 
 
