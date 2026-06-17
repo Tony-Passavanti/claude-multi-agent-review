@@ -593,3 +593,213 @@ def test_review_with_non_utf8_persona_file_returns_synthetic_verdict(
     # of `review()` itself. The environment-classification property
     # is covered by test_review_persona_read_failure_classified_environment.
     assert "bad-encoding.md" in v.reasoning
+
+
+# --- usage_sink (issue #18) ------------------------------------------------
+#
+# review() captures per-reviewer token/cost usage from the claude -p
+# envelope and emits it once via the optional usage_sink callback. These
+# tests drive review() end-to-end with a monkeypatched subprocess so the
+# envelope (and its `usage` block) is fully controlled.
+
+import subprocess as _subprocess  # noqa: E402
+import types  # noqa: E402
+
+from src.metrics import ReviewerUsage  # noqa: E402
+
+
+def _usage_envelope(
+    result_body: object,
+    *,
+    input_tokens: int = 9,
+    output_tokens: int = 66,
+    cost: float = 0.0143173,
+    is_error: bool = False,
+) -> str:
+    """A claude -p envelope carrying both a `result` body and a `usage`
+    block, shaped like the real Phase 0 capture."""
+    return json.dumps({
+        "type": "result",
+        "subtype": "success",
+        "is_error": is_error,
+        "duration_ms": 1873,
+        "result": result_body if isinstance(result_body, str)
+        else json.dumps(result_body),
+        "total_cost_usd": cost,
+        "usage": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_creation_input_tokens": 10244,
+            "cache_read_input_tokens": 7623,
+        },
+    })
+
+
+def _fake_proc(stdout: str, *, returncode: int = 0, stderr: str = ""):
+    return types.SimpleNamespace(
+        returncode=returncode, stdout=stdout, stderr=stderr,
+    )
+
+
+def _persona_file(tmp_path: Path, name: str) -> Path:
+    p = tmp_path / f"{name}.md"
+    p.write_text(f"# {name} persona\n", encoding="utf-8")
+    return p
+
+
+def test_review_emits_usage_on_success(tmp_path: Path, monkeypatch) -> None:
+    persona = _persona_file(tmp_path, "correctness")
+    envelope = _usage_envelope(_good_verdict_dict(name="correctness"))
+    monkeypatch.setattr(_subprocess, "run", lambda *a, **k: _fake_proc(envelope))
+
+    seen: list[ReviewerUsage] = []
+    v = review(
+        persona_name="correctness",
+        persona_path=persona,
+        spec="# spec",
+        diff_payload="diff",
+        config=_basic_config(tmp_path),
+        usage_sink=seen.append,
+    )
+
+    assert isinstance(v, Verdict)
+    assert len(seen) == 1
+    u = seen[0]
+    assert u.agent_name == "correctness"
+    assert u.input_tokens == 9
+    assert u.output_tokens == 66
+    assert u.cache_read_input_tokens == 7623
+    assert u.cost_usd == 0.0143173
+    assert u.attempts == 1
+    assert u.is_error is False
+
+
+def test_review_sums_usage_across_parse_retry(tmp_path: Path, monkeypatch) -> None:
+    # First attempt: a readable envelope whose result body isn't a valid
+    # verdict (parse failure → retriable). Second attempt: a clean verdict.
+    # Both cost tokens, so usage must be summed and attempts must be 2.
+    persona = _persona_file(tmp_path, "correctness")
+    bad = _usage_envelope("there is no json object here", input_tokens=9)
+    good = _usage_envelope(_good_verdict_dict(name="correctness"), input_tokens=9)
+    envelopes = iter([bad, good])
+    monkeypatch.setattr(
+        _subprocess, "run", lambda *a, **k: _fake_proc(next(envelopes)),
+    )
+
+    seen: list[ReviewerUsage] = []
+    cfg = _basic_config(tmp_path)  # reviewer_retries=1 → max_attempts=2
+    v = review(
+        persona_name="correctness",
+        persona_path=persona,
+        spec="# spec",
+        diff_payload="diff",
+        config=cfg,
+        usage_sink=seen.append,
+    )
+
+    assert v.verdict == "PASS"
+    assert len(seen) == 1
+    u = seen[0]
+    assert u.attempts == 2
+    assert u.input_tokens == 18  # 9 + 9 summed across both attempts
+    assert u.cost_usd == 0.0143173 * 2
+
+
+def test_review_does_not_emit_usage_when_no_envelope(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    # Every attempt exits non-zero → no envelope is produced, so there is
+    # no usage to attribute and the sink is never called.
+    persona = _persona_file(tmp_path, "correctness")
+    monkeypatch.setattr(
+        _subprocess, "run",
+        lambda *a, **k: _fake_proc("", returncode=1, stderr="boom"),
+    )
+
+    seen: list[ReviewerUsage] = []
+    v = review(
+        persona_name="correctness",
+        persona_path=persona,
+        spec="# spec",
+        diff_payload="diff",
+        config=_basic_config(tmp_path),
+        usage_sink=seen.append,
+    )
+
+    assert v.verdict == "WARN"  # synthetic failure verdict
+    assert seen == []
+
+
+def test_review_emits_usage_even_when_verdict_unparseable(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    # All attempts return a readable envelope whose body never parses to a
+    # verdict. review() ends in a synthetic verdict, but the tokens were
+    # still spent — usage must be emitted (summed across the attempts).
+    persona = _persona_file(tmp_path, "correctness")
+    bad = _usage_envelope("no verdict here", input_tokens=5)
+    monkeypatch.setattr(_subprocess, "run", lambda *a, **k: _fake_proc(bad))
+
+    seen: list[ReviewerUsage] = []
+    cfg = _basic_config(tmp_path)  # max_attempts=2
+    v = review(
+        persona_name="correctness",
+        persona_path=persona,
+        spec="# spec",
+        diff_payload="diff",
+        config=cfg,
+        usage_sink=seen.append,
+    )
+
+    assert v.verdict == "WARN"
+    assert len(seen) == 1
+    assert seen[0].attempts == 2
+    assert seen[0].input_tokens == 10  # 5 + 5
+
+
+def test_review_usage_sink_exception_does_not_escape(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    # errors.reviewer-never-raises-on-failure: a usage_sink that raises must
+    # NOT propagate out of review(). The verdict still returns; the error is
+    # routed through the lock-aware `log` (output.streaming-via-lock), not
+    # written straight to stderr from the worker thread.
+    persona = _persona_file(tmp_path, "correctness")
+    envelope = _usage_envelope(_good_verdict_dict(name="correctness"))
+    monkeypatch.setattr(_subprocess, "run", lambda *a, **k: _fake_proc(envelope))
+
+    def boom(_usage) -> None:
+        raise RuntimeError("sink blew up")
+
+    logs: list[str] = []
+    v = review(
+        persona_name="correctness",
+        persona_path=persona,
+        spec="# spec",
+        diff_payload="diff",
+        config=_basic_config(tmp_path),
+        usage_sink=boom,
+        log=logs.append,
+    )
+    assert isinstance(v, Verdict)
+    assert v.verdict == "PASS"  # review still returned its verdict
+    assert any("usage sink error" in m for m in logs)
+    assert capsys.readouterr().err == ""  # not written directly to stderr
+
+
+def test_review_without_usage_sink_still_succeeds(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    # usage_sink is optional; omitting it must not change behavior.
+    persona = _persona_file(tmp_path, "correctness")
+    envelope = _usage_envelope(_good_verdict_dict(name="correctness"))
+    monkeypatch.setattr(_subprocess, "run", lambda *a, **k: _fake_proc(envelope))
+
+    v = review(
+        persona_name="correctness",
+        persona_path=persona,
+        spec="# spec",
+        diff_payload="diff",
+        config=_basic_config(tmp_path),
+    )
+    assert v.verdict == "PASS"

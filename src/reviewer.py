@@ -15,11 +15,13 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal
 
+from . import metrics
 from .aggregate import Finding, Verdict
 from .config import Config
 
@@ -47,6 +49,11 @@ class _AttemptOutcome:
     verdict: Verdict | None
     failure_class: FailureClass | None
     reason: str  # human-readable, for logs and synthetic-verdict reasoning
+    # Resource usage for this attempt, parsed from the claude -p envelope.
+    # Populated whenever the subprocess returned an envelope we could read
+    # (success OR parse-failure — both still cost tokens). None when no
+    # envelope was produced (timeout, non-zero exit, binary missing).
+    usage: metrics.ReviewerUsage | None = None
 
 
 # --- public entry point -----------------------------------------------------
@@ -59,6 +66,7 @@ def review(
     diff_payload: str,
     config: Config,
     log: Callable[[str], None] | None = None,
+    usage_sink: Callable[[metrics.ReviewerUsage], None] | None = None,
 ) -> Verdict:
     """Run one reviewer end-to-end.
 
@@ -68,6 +76,16 @@ def review(
     orchestrator passes a lock-aware logger per CLAUDE.md
     output.streaming-via-lock; callers that don't share a stream — e.g.
     scripts/smoke_review.py — can omit it or pass any plain printer).
+
+    `usage_sink`, when provided, is called exactly once before this
+    function returns, with the reviewer's token/cost usage summed across
+    all of its claude -p attempts (a parse-retry contributes a second
+    attempt's tokens). It is NOT called when no attempt produced a
+    readable envelope (e.g. the persona file was unreadable, or every
+    attempt timed out). Like `log`, it should be cheap, and callers
+    needing thread-safety must synchronize inside the sink. If it raises,
+    the error is reported to stderr and swallowed — review() still returns
+    its Verdict (errors.reviewer-never-raises-on-failure).
     """
     # Read the persona prompt. Guard against the file being unreadable
     # for any reason that prevents review() from completing:
@@ -102,6 +120,7 @@ def review(
     max_attempts = config.reviewer_retries + 1
     append_system_prompt = ""
     last_outcome: _AttemptOutcome | None = None
+    accumulated_usage: metrics.ReviewerUsage | None = None
 
     for attempt in range(1, max_attempts + 1):
         outcome = _run_one_attempt(
@@ -112,7 +131,14 @@ def review(
             config=config,
         )
 
+        if outcome.usage is not None:
+            accumulated_usage = (
+                outcome.usage if accumulated_usage is None
+                else metrics.combine(accumulated_usage, outcome.usage)
+            )
+
         if outcome.verdict is not None:
+            _emit_usage(usage_sink, accumulated_usage, log)
             return outcome.verdict
 
         last_outcome = outcome
@@ -138,12 +164,45 @@ def review(
     actual_attempts = (
         attempt if last_outcome.failure_class in _NON_RETRIABLE else max_attempts
     )
+    _emit_usage(usage_sink, accumulated_usage, log)
     return _synthetic_verdict(
         persona_name=persona_name,
         outcome=last_outcome,
         attempts=actual_attempts,
         mode=config.treat_reviewer_failure_as,
     )
+
+
+def _emit_usage(
+    usage_sink: Callable[[metrics.ReviewerUsage], None] | None,
+    usage: metrics.ReviewerUsage | None,
+    log: Callable[[str], None] | None,
+) -> None:
+    """Call the usage sink once, if both a sink and captured usage exist.
+
+    Guarded: errors.reviewer-never-raises-on-failure is absolute — review()
+    MUST always return a Verdict, and the orchestrator depends on it. A
+    misbehaving sink (threading fault, I/O error in the caller's
+    aggregation path) must not propagate out of review(), so any exception
+    is reported and swallowed. Usage reporting is best-effort.
+    """
+    if usage_sink is None or usage is None:
+        return
+    try:
+        usage_sink(usage)
+    except Exception as e:
+        # Documented broad catch (errors.no-bare-except): the sink is
+        # caller-supplied and may raise anything; none of it may be allowed
+        # to break the review or block the push. Report and continue.
+        msg = f"claude-multi-agent-review: usage sink error (ignored): {e}"
+        # Route through the lock-aware `log` (the orchestrator supplies one)
+        # so we don't garble the spinner per output.streaming-via-lock. When
+        # `log` is None there is no orchestrator and thus no spinner thread,
+        # so a direct stderr write is safe.
+        if log is not None:
+            log(msg)
+        else:
+            print(msg, file=sys.stderr, flush=True)
 
 
 # --- one attempt ------------------------------------------------------------
@@ -221,13 +280,23 @@ def _run_one_attempt(
             reason=f"claude -p exited {proc.returncode}: {_trim(proc.stderr)}",
         )
 
+    # returncode 0 means an envelope was produced; capture its usage even
+    # if the verdict body fails to parse (the call still cost tokens).
+    attempt_usage = metrics.usage_from_stdout(proc.stdout, agent_name=persona_name)
+
     verdict_or_reason = _parse_verdict(proc.stdout, persona_name=persona_name)
     if isinstance(verdict_or_reason, Verdict):
-        return _AttemptOutcome(verdict=verdict_or_reason, failure_class=None, reason="")
+        return _AttemptOutcome(
+            verdict=verdict_or_reason,
+            failure_class=None,
+            reason="",
+            usage=attempt_usage,
+        )
     return _AttemptOutcome(
         verdict=None,
         failure_class="parse",
         reason=verdict_or_reason,
+        usage=attempt_usage,
     )
 
 
