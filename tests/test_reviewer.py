@@ -787,6 +787,38 @@ def test_review_usage_sink_exception_does_not_escape(
     assert capsys.readouterr().err == ""  # not written directly to stderr
 
 
+def test_review_captures_usage_on_nonzero_exit(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    # A failed attempt (nonzero exit) whose stdout still carries an envelope
+    # — e.g. a usage/limit error — was still billed, so its usage must be
+    # captured and accumulated (addresses Codex P2 on #18). Both attempts
+    # fail this way, so usage sums across them and the verdict is synthetic.
+    persona = _persona_file(tmp_path, "correctness")
+    env = _usage_envelope("limit reached, no verdict", input_tokens=4, is_error=True)
+    monkeypatch.setattr(
+        _subprocess, "run",
+        lambda *a, **k: _fake_proc(env, returncode=1, stderr="usage limit reached"),
+    )
+
+    seen: list[ReviewerUsage] = []
+    cfg = _basic_config(tmp_path)  # reviewer_retries=1 → max_attempts=2
+    v = review(
+        persona_name="correctness",
+        persona_path=persona,
+        spec="# spec",
+        diff_payload="diff",
+        config=cfg,
+        usage_sink=seen.append,
+    )
+
+    assert v.verdict == "WARN"  # synthetic — every attempt failed
+    assert len(seen) == 1
+    assert seen[0].attempts == 2
+    assert seen[0].input_tokens == 8  # 4 + 4 across both billed failures
+    assert seen[0].is_error is True
+
+
 def test_review_without_usage_sink_still_succeeds(
     tmp_path: Path, monkeypatch,
 ) -> None:

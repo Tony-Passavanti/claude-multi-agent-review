@@ -278,6 +278,13 @@ def _run_one_attempt(
             verdict=None,
             failure_class=failure_class,
             reason=f"claude -p exited {proc.returncode}: {_trim(proc.stderr)}",
+            # A nonzero exit can still emit a JSON envelope on stdout (e.g. a
+            # usage/limit error), and that failed attempt was billed. Capture
+            # its usage so cost accounting covers all attempts, not just
+            # successful ones. usage_from_stdout returns None when stdout is
+            # not a JSON object (the common error case: diagnostics on stderr,
+            # nothing parseable on stdout).
+            usage=metrics.usage_from_stdout(proc.stdout, agent_name=persona_name),
         )
 
     # returncode 0 means an envelope was produced; capture its usage even
