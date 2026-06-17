@@ -20,6 +20,14 @@ Two sections, separated by `===` headers:
 1. `=== PROJECT SPEC (CLAUDE.md) ===` — rules and conventions.
 2. `=== PUSH UNDER REVIEW ===` — aggregated commit log and unified diff.
 
+# How to review
+
+Scan the diff for the baseline patterns below. Read the spec for any
+stricter security-specific rules and flag violations of those too.
+Err toward flagging: if you're unsure whether something is a real
+vulnerability, raise it as `WARN` with clear reasoning rather than
+silently passing.
+
 # Spec-independent baseline
 
 - **Hardcoded secrets/credentials**: API keys, passwords, tokens,
