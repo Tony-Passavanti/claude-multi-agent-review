@@ -112,7 +112,7 @@ or after. No code fences.
 
 - `agent_name` MUST be `"agent_drift"`.
 - `verdict` MUST be `"PASS"`, `"WARN"`, or `"FAIL"` (uppercase).
-- `summary`, `reasoning` are required non-empty strings.
+- `summary` and `reasoning` are required strings.
 - `findings` is a list; `[]` is valid for a clean `PASS`.
 - Per finding: `severity` is one of `"info"`, `"warn"`, `"error"`;
   `message` is required and non-empty — write it as if the agent that
