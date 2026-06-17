@@ -12,8 +12,18 @@ capture so the field names stay pinned to reality.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
-from src.metrics import ReviewerUsage, combine, usage_from_stdout
+from src.aggregate import Finding, Verdict
+from src.config import Config
+from src.metrics import (
+    ReviewerUsage,
+    build_run_record,
+    combine,
+    format_summary,
+    record_run,
+    usage_from_stdout,
+)
 
 
 def _envelope(
@@ -185,3 +195,208 @@ def test_combine_keeps_first_agent_name() -> None:
     a = ReviewerUsage(agent_name="first", attempts=1)
     b = ReviewerUsage(agent_name="second", attempts=1)
     assert combine(a, b).agent_name == "first"
+
+
+# --- build_run_record -------------------------------------------------------
+
+def _verdict(name: str, level: str = "PASS", findings: int = 0) -> Verdict:
+    return Verdict(
+        agent_name=name,
+        verdict=level,  # type: ignore[arg-type]
+        summary="s",
+        reasoning="r",
+        findings=[
+            Finding(severity="warn", message=f"f{i}") for i in range(findings)
+        ],
+    )
+
+
+def _usage(name: str, **kw) -> ReviewerUsage:
+    return ReviewerUsage(agent_name=name, attempts=1, **kw)
+
+
+def test_build_run_record_joins_usage_by_name() -> None:
+    verdicts = [_verdict("a", "PASS", findings=1), _verdict("b", "WARN", findings=2)]
+    usages = [
+        _usage("a", input_tokens=10, cost_usd=0.01),
+        _usage("b", input_tokens=20, cost_usd=0.02),
+    ]
+    rec = build_run_record(
+        verdicts, usages,
+        model="claude-sonnet-4-6", changed_lines=42, exit_code=0,
+        timestamp="2026-06-17T00:00:00Z",
+    )
+    assert rec.schema_version == 1
+    assert rec.model == "claude-sonnet-4-6"
+    assert rec.changed_lines == 42
+    assert rec.exit_code == 0
+    by_name = {r.name: r for r in rec.reviewers}
+    assert by_name["a"].input_tokens == 10
+    assert by_name["a"].findings == 1
+    assert by_name["b"].cost_usd == 0.02
+    assert by_name["b"].findings == 2
+
+
+def test_build_run_record_zero_usage_for_unmatched_verdict() -> None:
+    # A synthetic verdict (missing persona / crash / meta-WARN) has no
+    # matching usage → a zero row, so it appears without distorting totals.
+    verdicts = [_verdict("ran"), _verdict("synthetic")]
+    usages = [_usage("ran", input_tokens=5, cost_usd=0.5)]
+    rec = build_run_record(
+        verdicts, usages, model="m", changed_lines=1, exit_code=0,
+    )
+    by_name = {r.name: r for r in rec.reviewers}
+    assert by_name["synthetic"].input_tokens == 0
+    assert by_name["synthetic"].cost_usd == 0.0
+    assert by_name["synthetic"].attempts == 0
+
+
+def test_build_run_record_serializes_to_json() -> None:
+    # asdict(record) must be JSON-serializable (no dataclass leaks) and
+    # round-trip cleanly — this is exactly what gets written to the log.
+    rec = build_run_record(
+        [_verdict("a", findings=1)], [_usage("a", input_tokens=3)],
+        model="m", changed_lines=1, exit_code=0,
+        timestamp="2026-06-17T00:00:00Z",
+    )
+    from dataclasses import asdict
+    parsed = json.loads(json.dumps(asdict(rec)))
+    assert parsed["ts"] == "2026-06-17T00:00:00Z"
+    assert parsed["reviewers"][0]["name"] == "a"
+    assert parsed["reviewers"][0]["input_tokens"] == 3
+
+
+# --- format_summary ---------------------------------------------------------
+
+def test_format_summary_is_ascii_and_has_key_numbers() -> None:
+    rec = build_run_record(
+        [_verdict("a"), _verdict("b")],
+        [
+            _usage("a", input_tokens=1000, cache_read_input_tokens=3000),
+            _usage("b", input_tokens=1000, cache_creation_input_tokens=1000),
+        ],
+        model="m", changed_lines=1, exit_code=0,
+    )
+    s = format_summary(rec)
+    s.encode("ascii")  # must not raise — ASCII-only for cp1252 stderr safety
+    assert "2 reviewers" in s
+    assert "cached" in s
+    assert "$" in s
+
+
+def test_format_summary_cache_ratio_zero_division_safe() -> None:
+    # All-synthetic run: no tokens at all. Must not raise on the cache %.
+    rec = build_run_record(
+        [_verdict("ghost")], [], model="m", changed_lines=0, exit_code=0,
+    )
+    s = format_summary(rec)
+    assert "0%" in s
+    assert "1 reviewer," in s  # singular
+
+
+# --- record_run (persistence) ----------------------------------------------
+
+def _config(repo_root: Path, **overrides) -> Config:
+    defaults: dict = dict(
+        spec_path=Path("CLAUDE.md"),
+        default_branch="",
+        enabled_personas=["a"],
+        model="claude-sonnet-4-6",
+        parallel=False,
+        review_tags=False,
+        override_env="CLAUDE_MULTI_AGENT_REVIEW_OVERRIDE",
+        reviewer_timeout_seconds=180,
+        reviewer_retries=1,
+        treat_reviewer_failure_as="warn",
+        max_diff_lines=5000,
+        install_root=repo_root,
+        repo_root=repo_root,
+    )
+    defaults.update(overrides)
+    return Config(**defaults)
+
+
+def test_record_run_appends_jsonl_line(tmp_path: Path) -> None:
+    cfg = _config(tmp_path, metrics_path="m.jsonl")
+    summary = record_run(
+        cfg, [_verdict("a", findings=1)], [_usage("a", input_tokens=7, cost_usd=0.1)],
+        changed_lines=12, exit_code=0,
+    )
+    log = tmp_path / "m.jsonl"
+    assert log.is_file()
+    line = log.read_text(encoding="utf-8").strip()
+    rec = json.loads(line)
+    assert rec["changed_lines"] == 12
+    assert rec["reviewers"][0]["input_tokens"] == 7
+    assert "claude-multi-agent-review:" in summary
+
+
+def test_record_run_appends_not_overwrites(tmp_path: Path) -> None:
+    cfg = _config(tmp_path, metrics_path="m.jsonl")
+    record_run(cfg, [_verdict("a")], [_usage("a")], changed_lines=1, exit_code=0)
+    record_run(cfg, [_verdict("a")], [_usage("a")], changed_lines=2, exit_code=0)
+    lines = (tmp_path / "m.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 2
+    assert json.loads(lines[0])["changed_lines"] == 1
+    assert json.loads(lines[1])["changed_lines"] == 2
+
+
+def test_record_run_creates_parent_dir(tmp_path: Path) -> None:
+    cfg = _config(tmp_path, metrics_path="nested/dir/m.jsonl")
+    record_run(cfg, [_verdict("a")], [_usage("a")], changed_lines=1, exit_code=0)
+    assert (tmp_path / "nested" / "dir" / "m.jsonl").is_file()
+
+
+def test_record_run_adds_path_to_gitignore(tmp_path: Path) -> None:
+    cfg = _config(tmp_path, metrics_path=".cmar/metrics.jsonl")
+    record_run(cfg, [_verdict("a")], [_usage("a")], changed_lines=1, exit_code=0)
+    gitignore = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert ".cmar/metrics.jsonl" in gitignore.splitlines()
+
+
+def test_record_run_gitignore_idempotent(tmp_path: Path) -> None:
+    cfg = _config(tmp_path, metrics_path=".cmar/metrics.jsonl")
+    record_run(cfg, [_verdict("a")], [_usage("a")], changed_lines=1, exit_code=0)
+    record_run(cfg, [_verdict("a")], [_usage("a")], changed_lines=2, exit_code=0)
+    entries = [
+        ln for ln in (tmp_path / ".gitignore").read_text(encoding="utf-8").splitlines()
+        if ln.strip() == ".cmar/metrics.jsonl"
+    ]
+    assert len(entries) == 1  # not appended twice
+
+
+def test_record_run_preserves_existing_gitignore(tmp_path: Path) -> None:
+    (tmp_path / ".gitignore").write_text("__pycache__/\n*.pyc", encoding="utf-8")
+    cfg = _config(tmp_path, metrics_path=".cmar/metrics.jsonl")
+    record_run(cfg, [_verdict("a")], [_usage("a")], changed_lines=1, exit_code=0)
+    lines = (tmp_path / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert "__pycache__/" in lines
+    assert "*.pyc" in lines  # not mangled despite missing trailing newline
+    assert ".cmar/metrics.jsonl" in lines
+
+
+def test_record_run_rejects_path_outside_repo(tmp_path: Path, capsys) -> None:
+    # metrics_path escaping the repo root must be refused (no write) but the
+    # summary still returns so the per-run line shows.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cfg = _config(repo, metrics_path="../escape.jsonl")
+    summary = record_run(
+        cfg, [_verdict("a")], [_usage("a")], changed_lines=1, exit_code=0,
+    )
+    assert not (tmp_path / "escape.jsonl").exists()
+    assert "claude-multi-agent-review:" in summary
+    assert "outside the repo" in capsys.readouterr().err
+
+
+def test_record_run_write_failure_is_best_effort(tmp_path: Path, capsys) -> None:
+    # If the target path can't be written (here: a directory exists where
+    # the file should be), record_run must not raise — it degrades to a
+    # stderr notice and still returns the summary.
+    cfg = _config(tmp_path, metrics_path="m.jsonl")
+    (tmp_path / "m.jsonl").mkdir()  # collide: open('a') on a dir → OSError
+    summary = record_run(
+        cfg, [_verdict("a")], [_usage("a")], changed_lines=1, exit_code=0,
+    )
+    assert "claude-multi-agent-review:" in summary
+    assert "could not write metrics" in capsys.readouterr().err

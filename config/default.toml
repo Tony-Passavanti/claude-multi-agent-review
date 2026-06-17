@@ -96,3 +96,15 @@ treat_reviewer_failure_as = "warn"
 #   patterns = ["tests/*"]
 #   personas = ["spec_conformance", "tests", "agent_drift", "correctness"]
 reviewer_gates = []
+
+# --- Observability ---------------------------------------------------------
+
+# Record per-run token usage and actual cost to a JSONL log (one line per
+# push). On by default. The log holds only counts and costs — never diffs,
+# file paths, or finding text. Set false to disable all metrics recording.
+metrics_enabled = true
+
+# Path (relative to repo root) for the metrics log. On first write the hook
+# appends one JSON line per push and adds this path to the repo's .gitignore
+# so the log is not accidentally committed.
+metrics_path = ".claude-multi-agent-review/metrics.jsonl"

@@ -386,7 +386,7 @@ def run(
     stdin: TextIO,
 ) -> int:
     # Imported here to avoid a circular import at module load.
-    from . import aggregate, config as config_mod, orchestrate
+    from . import aggregate, config as config_mod, metrics, orchestrate
 
     # Load config first so `override_env` is repo-configurable. Cost is
     # two TOML reads; negligible compared to a `claude -p` invocation.
@@ -448,8 +448,15 @@ def run(
             print(f"  {ref}: {reason}", file=sys.stderr)
         return 0
 
+    # Collect per-reviewer usage only when metrics are enabled, so disabling
+    # them skips the work entirely. orchestrate serializes appends to this
+    # list under its stream lock, so reading it after review_all returns
+    # (all reviewer threads joined) is safe.
+    usages: list[metrics.ReviewerUsage] = []
+    usage_sink = usages.append if config.metrics_enabled else None
+
     try:
-        verdicts = orchestrate.review_all(payload, config)
+        verdicts = orchestrate.review_all(payload, config, usage_sink=usage_sink)
     except FileNotFoundError as e:
         print(f"claude-multi-agent-review: {e}", file=sys.stderr)
         print(
@@ -460,4 +467,15 @@ def run(
 
     exit_code, report = aggregate.aggregate(verdicts)
     aggregate.print_report(report)
+
+    # Per-run metrics: best-effort, never alters exit_code. The spinner has
+    # stopped by now, so the summary can go straight to stderr.
+    if config.metrics_enabled:
+        summary = metrics.record_run(
+            config, verdicts, usages,
+            changed_lines=payload.total_changed_lines,
+            exit_code=exit_code,
+        )
+        print(summary, file=sys.stderr, flush=True)
+
     return exit_code

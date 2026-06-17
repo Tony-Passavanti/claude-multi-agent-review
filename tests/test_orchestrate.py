@@ -22,6 +22,7 @@ import pytest
 from src import hook
 from src.aggregate import Verdict
 from src.config import Config, ReviewerGate
+from src.metrics import ReviewerUsage
 from src.orchestrate import (
     _changed_files_from_payload,
     _diff_size_meta_verdict,
@@ -94,6 +95,7 @@ def _payload_with_files(*paths: str) -> hook.ReviewPayload:
 def _mock_reviewer(
     *, persona_name: str, persona_path: Path, spec: str,
     diff_payload: str, config: Config, log: Callable[[str], None] | None = None,
+    usage_sink: Callable[..., None] | None = None,
 ) -> Verdict:
     """A stand-in for reviewer.review that returns PASS without invoking claude."""
     return _verdict(persona_name, "PASS", f"mock review of {persona_name}")
@@ -475,6 +477,52 @@ def test_review_all_passes_spec_and_diff_to_reviewer(
     assert "diff --git" in received["diff_payload"]
     assert received["config"] is cfg
     assert callable(received["log"])  # orchestrator passes its lock-aware logger
+
+
+# --- review_all: usage_sink forwarding (issue #19) ------------------------
+
+def test_review_all_forwards_usage_sink(make_persona, make_config) -> None:
+    # When a usage_sink is supplied, every reviewer's usage must reach it.
+    # Two personas + parallel exercises the lock-wrapped forwarder across
+    # threads (the collected list is the cross-thread shared state).
+    make_persona("a")
+    make_persona("b")
+    cfg = make_config(enabled_personas=["a", "b"], parallel=True)
+
+    def reviewer_with_usage(**kwargs) -> Verdict:
+        sink = kwargs.get("usage_sink")
+        if sink is not None:
+            sink(ReviewerUsage(
+                agent_name=kwargs["persona_name"],
+                input_tokens=10, cost_usd=0.01, attempts=1,
+            ))
+        return _verdict(kwargs["persona_name"])
+
+    collected: list[ReviewerUsage] = []
+    review_all(
+        _payload(), cfg,
+        reviewer_fn=reviewer_with_usage, usage_sink=collected.append,
+    )
+    assert {u.agent_name for u in collected} == {"a", "b"}
+    assert all(u.input_tokens == 10 for u in collected)
+
+
+def test_review_all_no_usage_sink_passes_none_to_reviewer(
+    make_persona, make_config,
+) -> None:
+    # Default (no usage_sink): reviewers still receive the kwarg, set to
+    # None, so they can skip usage work.
+    make_persona("solo")
+    cfg = make_config(enabled_personas=["solo"])
+    received: dict = {}
+
+    def capturing_reviewer(**kwargs) -> Verdict:
+        received.update(kwargs)
+        return _verdict(kwargs["persona_name"])
+
+    review_all(_payload(), cfg, reviewer_fn=capturing_reviewer)
+    assert "usage_sink" in received
+    assert received["usage_sink"] is None
 
 
 # --- changed-file extraction ----------------------------------------------

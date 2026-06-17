@@ -26,7 +26,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable, TextIO
 
-from . import hook, reviewer
+from . import hook, metrics, reviewer
 from .aggregate import Verdict
 from .config import Config, ReviewerGate
 
@@ -46,9 +46,21 @@ def review_all(
     config: Config,
     *,
     reviewer_fn: Callable[..., Verdict] = reviewer.review,
+    usage_sink: Callable[[metrics.ReviewerUsage], None] | None = None,
 ) -> list[Verdict]:
     spec = _read_spec(config)  # raises FileNotFoundError; hook.run catches it
     diff_text = hook.format_diff_payload(payload)
+
+    # Reviewers run on worker threads and emit usage from there. Wrap the
+    # caller's sink so every call is serialized under _stream_lock — the
+    # same lock that guards the streaming UI — per CLAUDE.md
+    # concurrency.thread-safety-orchestrate. None when the caller isn't
+    # collecting usage (metrics disabled), so reviewers skip the work.
+    usage_forward: Callable[[metrics.ReviewerUsage], None] | None = None
+    if usage_sink is not None:
+        def usage_forward(u: metrics.ReviewerUsage) -> None:  # noqa: F811
+            with _stream_lock:
+                usage_sink(u)
 
     active_personas, gate = _select_personas(payload, config)
 
@@ -88,10 +100,12 @@ def review_all(
         if config.parallel and len(real_jobs) > 1:
             verdicts.extend(_dispatch_parallel(
                 real_jobs, spec, diff_text, config, reviewer_fn, spinner,
+                usage_forward,
             ))
         else:
             verdicts.extend(_dispatch_sequential(
                 real_jobs, spec, diff_text, config, reviewer_fn, spinner,
+                usage_forward,
             ))
     finally:
         spinner.stop()
@@ -108,6 +122,7 @@ def _dispatch_parallel(
     config: Config,
     reviewer_fn: Callable[..., Verdict],
     spinner: _Spinner,
+    usage_sink: Callable[[metrics.ReviewerUsage], None] | None = None,
 ) -> list[Verdict]:
     verdicts: list[Verdict] = []
     with ThreadPoolExecutor(max_workers=len(jobs)) as exe:
@@ -120,6 +135,7 @@ def _dispatch_parallel(
                 diff_payload=diff_text,
                 config=config,
                 log=_stream_line,
+                usage_sink=usage_sink,
             ): name
             for name, path in jobs
         }
@@ -141,6 +157,7 @@ def _dispatch_sequential(
     config: Config,
     reviewer_fn: Callable[..., Verdict],
     spinner: _Spinner,
+    usage_sink: Callable[[metrics.ReviewerUsage], None] | None = None,
 ) -> list[Verdict]:
     verdicts: list[Verdict] = []
     for name, path in jobs:
@@ -152,6 +169,7 @@ def _dispatch_sequential(
                 diff_payload=diff_text,
                 config=config,
                 log=_stream_line,
+                usage_sink=usage_sink,
             )
         except Exception as e:  # reviewer.review shouldn't raise, but be safe
             v = _reviewer_crashed_verdict(name, e, config.treat_reviewer_failure_as)
