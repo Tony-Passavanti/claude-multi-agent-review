@@ -371,17 +371,18 @@ def test_record_run_tolerates_non_utf8_gitignore(tmp_path: Path) -> None:
     assert (tmp_path / "m.jsonl").is_file()  # write happened despite decode fail
 
 
-def test_record_run_refuses_symlinked_gitignore_escaping_repo(
-    tmp_path: Path,
-) -> None:
-    # If .gitignore is a symlink to a file OUTSIDE the repo, _ensure_gitignored
-    # must not follow it and append to that external file (Codex P2 on #19).
+def test_record_run_skips_symlinked_gitignore(tmp_path: Path) -> None:
+    # Git does not follow a symlinked .gitignore (gitignore(5) NOTES), so the
+    # hook must not write through it: that would dirty the link target while
+    # leaving the log un-ignored (Codex P2 on #19). Uses an in-repo target —
+    # the case where writing would otherwise "succeed" containment checks; an
+    # out-of-repo target is skipped by the same is_symlink() guard.
     repo = tmp_path / "repo"
     repo.mkdir()
-    external = tmp_path / "external.gitignore"
-    external.write_text("original\n", encoding="utf-8")
+    target = repo / "shared_ignore"
+    target.write_text("original\n", encoding="utf-8")
     try:
-        (repo / ".gitignore").symlink_to(external)
+        (repo / ".gitignore").symlink_to(target)
     except (OSError, NotImplementedError) as e:
         # Technical blocker: creating symlinks needs privilege/Developer Mode
         # on Windows; the production guard is platform-independent regardless.
@@ -391,8 +392,8 @@ def test_record_run_refuses_symlinked_gitignore_escaping_repo(
     summary = record_run(
         cfg, [_verdict("a")], [_usage("a")], changed_lines=1, exit_code=0,
     )
-    # The external file was NOT mutated...
-    assert external.read_text(encoding="utf-8") == "original\n"
+    # The symlink target was NOT written through...
+    assert target.read_text(encoding="utf-8") == "original\n"
     # ...and the metrics line was still written (the guard is gitignore-only).
     assert (repo / "m.jsonl").is_file()
     assert "claude-multi-agent-review:" in summary

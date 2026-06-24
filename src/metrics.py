@@ -303,17 +303,14 @@ def _ensure_gitignored(repo_root: Path, rel_path: str) -> None:
     """
     gitignore = repo_root / ".gitignore"
     try:
-        # Refuse to follow a .gitignore symlink whose target escapes the repo:
-        # appending would mutate a file outside the worktree on every push
-        # (metrics are on by default). `is_symlink` catches dangling links too;
-        # `resolve()` follows the link so the containment check sees the real
-        # target. Mirrors the in-repo path guards for spec_path / metrics_path.
-        # (Codex P2 on #19.)
+        # Skip a symlinked .gitignore entirely. Git does not follow a
+        # symlinked .gitignore (gitignore(5) NOTES), so writing through the
+        # link cannot achieve the goal — the log would stay un-ignored — and
+        # would actively dirty the link's target (a possibly-tracked in-repo
+        # file, or a file outside the worktree). Best-effort: in that unusual
+        # setup the log simply stays untracked. (Codex P2 on #19.)
         if gitignore.is_symlink():
-            try:
-                gitignore.resolve().relative_to(repo_root.resolve())
-            except ValueError:
-                return
+            return
         existing = gitignore.read_text(encoding="utf-8") if gitignore.is_file() else ""
         if rel_path in {ln.strip() for ln in existing.splitlines()}:
             return
