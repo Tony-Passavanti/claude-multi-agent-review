@@ -125,6 +125,11 @@ def _dispatch_parallel(
     usage_sink: Callable[[metrics.ReviewerUsage], None] | None = None,
 ) -> list[Verdict]:
     verdicts: list[Verdict] = []
+    # Only pass usage_sink when a sink is present. An injected reviewer_fn
+    # with the pre-metrics signature would otherwise raise TypeError on the
+    # unexpected kwarg even when metrics are off — and the orchestrator would
+    # mask it as a reviewer crash (addresses Codex P2 on #19).
+    sink_kwarg = {} if usage_sink is None else {"usage_sink": usage_sink}
     with ThreadPoolExecutor(max_workers=len(jobs)) as exe:
         futures = {
             exe.submit(
@@ -135,7 +140,7 @@ def _dispatch_parallel(
                 diff_payload=diff_text,
                 config=config,
                 log=_stream_line,
-                usage_sink=usage_sink,
+                **sink_kwarg,
             ): name
             for name, path in jobs
         }
@@ -160,6 +165,9 @@ def _dispatch_sequential(
     usage_sink: Callable[[metrics.ReviewerUsage], None] | None = None,
 ) -> list[Verdict]:
     verdicts: list[Verdict] = []
+    # See _dispatch_parallel: only forward usage_sink when present so an
+    # old-signature reviewer_fn isn't broken when metrics are off.
+    sink_kwarg = {} if usage_sink is None else {"usage_sink": usage_sink}
     for name, path in jobs:
         try:
             v = reviewer_fn(
@@ -169,7 +177,7 @@ def _dispatch_sequential(
                 diff_payload=diff_text,
                 config=config,
                 log=_stream_line,
-                usage_sink=usage_sink,
+                **sink_kwarg,
             )
         except Exception as e:  # reviewer.review shouldn't raise, but be safe
             v = _reviewer_crashed_verdict(name, e, config.treat_reviewer_failure_as)

@@ -507,11 +507,13 @@ def test_review_all_forwards_usage_sink(make_persona, make_config) -> None:
     assert all(u.input_tokens == 10 for u in collected)
 
 
-def test_review_all_no_usage_sink_passes_none_to_reviewer(
+def test_review_all_no_usage_sink_omits_kwarg_to_reviewer(
     make_persona, make_config,
 ) -> None:
-    # Default (no usage_sink): reviewers still receive the kwarg, set to
-    # None, so they can skip usage work.
+    # Default (no usage_sink): orchestrate must NOT pass usage_sink to the
+    # reviewer at all, so a pre-metrics reviewer_fn signature stays valid
+    # (Codex P2 on #19). When a sink IS supplied it is forwarded (covered by
+    # test_review_all_forwards_usage_sink).
     make_persona("solo")
     cfg = make_config(enabled_personas=["solo"])
     received: dict = {}
@@ -521,8 +523,30 @@ def test_review_all_no_usage_sink_passes_none_to_reviewer(
         return _verdict(kwargs["persona_name"])
 
     review_all(_payload(), cfg, reviewer_fn=capturing_reviewer)
-    assert "usage_sink" in received
-    assert received["usage_sink"] is None
+    assert "usage_sink" not in received
+
+
+def test_review_all_old_signature_reviewer_fn_without_metrics(
+    make_persona, make_config,
+) -> None:
+    # A reviewer_fn with the pre-metrics signature (no usage_sink param) must
+    # still work when no sink is requested — orchestrate must not forward the
+    # kwarg unconditionally, or the reviewer would raise TypeError and get
+    # masked as a synthetic crash verdict (Codex P2 on #19). Two personas +
+    # parallel exercises the _dispatch_parallel path.
+    make_persona("a")
+    make_persona("b")
+    cfg = make_config(enabled_personas=["a", "b"], parallel=True)
+
+    def old_reviewer(
+        *, persona_name, persona_path, spec, diff_payload, config, log=None,
+    ) -> Verdict:
+        return _verdict(persona_name, "PASS")
+
+    verdicts = review_all(_payload(), cfg, reviewer_fn=old_reviewer)
+    assert {v.agent_name for v in verdicts} == {"a", "b"}
+    assert all(v.verdict == "PASS" for v in verdicts)
+    assert all("crashed" not in v.summary for v in verdicts)
 
 
 # --- changed-file extraction ----------------------------------------------

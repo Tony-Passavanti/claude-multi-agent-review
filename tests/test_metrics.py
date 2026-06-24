@@ -354,6 +354,21 @@ def test_record_run_adds_path_to_gitignore(tmp_path: Path) -> None:
     assert ".cmar/metrics.jsonl" in gitignore.splitlines()
 
 
+def test_record_run_tolerates_non_utf8_gitignore(tmp_path: Path) -> None:
+    # An existing .gitignore with non-UTF-8 bytes must not crash record_run.
+    # read_text(encoding="utf-8") raises UnicodeDecodeError (a ValueError, not
+    # an OSError); if it escaped it would hit the top-level handler and flip
+    # the push to exit 2 — potentially allowing a push reviewers just blocked
+    # (Codex P2 on #19). The metrics line must still be written.
+    (tmp_path / ".gitignore").write_bytes(b"\xff\xfe not valid utf-8\n")
+    cfg = _config(tmp_path, metrics_path="m.jsonl")
+    summary = record_run(
+        cfg, [_verdict("a")], [_usage("a")], changed_lines=1, exit_code=0,
+    )
+    assert "claude-multi-agent-review:" in summary
+    assert (tmp_path / "m.jsonl").is_file()  # write happened despite decode fail
+
+
 def test_record_run_gitignore_idempotent(tmp_path: Path) -> None:
     cfg = _config(tmp_path, metrics_path=".cmar/metrics.jsonl")
     record_run(cfg, [_verdict("a")], [_usage("a")], changed_lines=1, exit_code=0)

@@ -309,9 +309,14 @@ def _ensure_gitignored(repo_root: Path, rel_path: str) -> None:
         prefix = "" if existing == "" or existing.endswith("\n") else "\n"
         with gitignore.open("a", encoding="utf-8") as f:
             f.write(f"{prefix}{rel_path}\n")
-    except OSError:
+    except (OSError, UnicodeError):
         # Best-effort (same rationale as _append_jsonl); worst case the
         # user sees the metrics file as untracked and can ignore it.
+        # UnicodeError (a ValueError subclass, NOT an OSError) is included
+        # because an existing .gitignore with non-UTF-8 bytes would make
+        # read_text raise UnicodeDecodeError — which must NOT escape to the
+        # top-level handler and flip the push to exit 2 (which could allow a
+        # push reviewers just blocked). Same trap guarded in reviewer.review.
         return
 
 
