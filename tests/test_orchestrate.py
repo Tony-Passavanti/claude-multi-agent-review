@@ -22,6 +22,7 @@ import pytest
 from src import hook
 from src.aggregate import Verdict
 from src.config import Config, ReviewerGate
+from src.metrics import ReviewerUsage
 from src.orchestrate import (
     _changed_files_from_payload,
     _diff_size_meta_verdict,
@@ -94,6 +95,7 @@ def _payload_with_files(*paths: str) -> hook.ReviewPayload:
 def _mock_reviewer(
     *, persona_name: str, persona_path: Path, spec: str,
     diff_payload: str, config: Config, log: Callable[[str], None] | None = None,
+    usage_sink: Callable[..., None] | None = None,
 ) -> Verdict:
     """A stand-in for reviewer.review that returns PASS without invoking claude."""
     return _verdict(persona_name, "PASS", f"mock review of {persona_name}")
@@ -475,6 +477,76 @@ def test_review_all_passes_spec_and_diff_to_reviewer(
     assert "diff --git" in received["diff_payload"]
     assert received["config"] is cfg
     assert callable(received["log"])  # orchestrator passes its lock-aware logger
+
+
+# --- review_all: usage_sink forwarding (issue #19) ------------------------
+
+def test_review_all_forwards_usage_sink(make_persona, make_config) -> None:
+    # When a usage_sink is supplied, every reviewer's usage must reach it.
+    # Two personas + parallel exercises the lock-wrapped forwarder across
+    # threads (the collected list is the cross-thread shared state).
+    make_persona("a")
+    make_persona("b")
+    cfg = make_config(enabled_personas=["a", "b"], parallel=True)
+
+    def reviewer_with_usage(**kwargs) -> Verdict:
+        sink = kwargs.get("usage_sink")
+        if sink is not None:
+            sink(ReviewerUsage(
+                agent_name=kwargs["persona_name"],
+                input_tokens=10, cost_usd=0.01, attempts=1,
+            ))
+        return _verdict(kwargs["persona_name"])
+
+    collected: list[ReviewerUsage] = []
+    review_all(
+        _payload(), cfg,
+        reviewer_fn=reviewer_with_usage, usage_sink=collected.append,
+    )
+    assert {u.agent_name for u in collected} == {"a", "b"}
+    assert all(u.input_tokens == 10 for u in collected)
+
+
+def test_review_all_no_usage_sink_omits_kwarg_to_reviewer(
+    make_persona, make_config,
+) -> None:
+    # Default (no usage_sink): orchestrate must NOT pass usage_sink to the
+    # reviewer at all, so a pre-metrics reviewer_fn signature stays valid
+    # (Codex P2 on #19). When a sink IS supplied it is forwarded (covered by
+    # test_review_all_forwards_usage_sink).
+    make_persona("solo")
+    cfg = make_config(enabled_personas=["solo"])
+    received: dict = {}
+
+    def capturing_reviewer(**kwargs) -> Verdict:
+        received.update(kwargs)
+        return _verdict(kwargs["persona_name"])
+
+    review_all(_payload(), cfg, reviewer_fn=capturing_reviewer)
+    assert "usage_sink" not in received
+
+
+def test_review_all_old_signature_reviewer_fn_without_metrics(
+    make_persona, make_config,
+) -> None:
+    # A reviewer_fn with the pre-metrics signature (no usage_sink param) must
+    # still work when no sink is requested — orchestrate must not forward the
+    # kwarg unconditionally, or the reviewer would raise TypeError and get
+    # masked as a synthetic crash verdict (Codex P2 on #19). Two personas +
+    # parallel exercises the _dispatch_parallel path.
+    make_persona("a")
+    make_persona("b")
+    cfg = make_config(enabled_personas=["a", "b"], parallel=True)
+
+    def old_reviewer(
+        *, persona_name, persona_path, spec, diff_payload, config, log=None,
+    ) -> Verdict:
+        return _verdict(persona_name, "PASS")
+
+    verdicts = review_all(_payload(), cfg, reviewer_fn=old_reviewer)
+    assert {v.agent_name for v in verdicts} == {"a", "b"}
+    assert all(v.verdict == "PASS" for v in verdicts)
+    assert all("crashed" not in v.summary for v in verdicts)
 
 
 # --- changed-file extraction ----------------------------------------------

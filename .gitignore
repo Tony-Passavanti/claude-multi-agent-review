@@ -13,3 +13,6 @@ Thumbs.db
 
 .claude-push-review/local.toml
 tests/fixtures/repos/
+
+# Per-run metrics log written by the hook (metrics_enabled, on by default).
+.claude-multi-agent-review/metrics.jsonl

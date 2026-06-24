@@ -245,6 +245,30 @@ Behavior:
 - The streaming header announces which gate matched (or "no gate
   matched") so you always see what ran.
 
+### Metrics (on by default)
+
+Each push appends one JSON line to `.claude-multi-agent-review/metrics.jsonl`
+recording, per reviewer, the token usage (input / output / cache-creation /
+cache-read kept separate), the **actual** cost (`claude -p`'s reported
+`total_cost_usd`, not an estimate), verdict, and finding count. After the
+report, a one-line summary prints to stderr:
+
+```
+claude-multi-agent-review: 7 reviewers, 48.1k tokens (31.2k cached, 65%), $0.1234
+```
+
+The log holds only counts and costs — never diffs, file paths, or finding
+text — so it is safe to keep around. On first write the hook adds the log
+path to your repo's `.gitignore` so it isn't accidentally committed.
+
+```toml
+# Record per-run usage and cost. On by default; set false to disable.
+metrics_enabled = true
+
+# Where to write the log (relative to repo root).
+metrics_path = ".claude-multi-agent-review/metrics.jsonl"
+```
+
 To override a shipped persona's prompt, drop your own
 `<name>.md` into `.claude-multi-agent-review/personas/` in your repo.
 Repo-local files win over shipped defaults.

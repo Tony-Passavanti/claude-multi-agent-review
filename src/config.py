@@ -44,7 +44,12 @@ _SCHEMA: dict[str, type] = {
 # Optional keys: validated when present, defaulted when absent. Kept off
 # `_SCHEMA` so older shipped defaults (or test fixtures that pre-date the
 # key) don't fail validation.
-_OPTIONAL_KEYS: tuple[str, ...] = ("reviewer_gates",)
+_OPTIONAL_KEYS: tuple[str, ...] = (
+    "reviewer_gates", "metrics_enabled", "metrics_path",
+)
+
+# Default location (relative to repo root) for the per-run metrics log.
+_DEFAULT_METRICS_PATH = ".claude-multi-agent-review/metrics.jsonl"
 
 _FAILURE_MODES = ("warn", "fail")
 
@@ -77,6 +82,8 @@ class Config:
     # positionally don't silently misbind.
     extra: dict[str, object] = field(default_factory=dict)
     reviewer_gates: list[ReviewerGate] = field(default_factory=list)
+    metrics_enabled: bool = True
+    metrics_path: str = _DEFAULT_METRICS_PATH
 
 
 def load(*, install_root: Path, repo_root: Path) -> Config:
@@ -170,6 +177,13 @@ def _config_from_dict(
     # reviewer_gates: optional. Validate shape if present; default to [].
     reviewer_gates = _parse_reviewer_gates(data.get("reviewer_gates", []))
 
+    # Metrics keys: optional, validated when present. Default to on (opt-out)
+    # at the shipped default path.
+    metrics_enabled = _parse_optional_bool(data, "metrics_enabled", default=True)
+    metrics_path = _parse_optional_str(
+        data, "metrics_path", default=_DEFAULT_METRICS_PATH,
+    )
+
     # Forward-compat: unknown keys go to `extra` and are surfaced as a
     # one-line notice. Not an error — a newer config file should still be
     # readable by an older hook (with the new features silently inactive).
@@ -199,7 +213,31 @@ def _config_from_dict(
         repo_root=repo_root,
         extra=extra,
         reviewer_gates=reviewer_gates,
+        metrics_enabled=metrics_enabled,
+        metrics_path=metrics_path,
     )
+
+
+def _parse_optional_bool(data: dict[str, Any], key: str, *, default: bool) -> bool:
+    if key not in data:
+        return default
+    value = data[key]
+    if not isinstance(value, bool):
+        raise ValueError(
+            f"config key {key!r}: expected bool, got {type(value).__name__}"
+        )
+    return value
+
+
+def _parse_optional_str(data: dict[str, Any], key: str, *, default: str) -> str:
+    if key not in data:
+        return default
+    value = data[key]
+    if not isinstance(value, str):
+        raise ValueError(
+            f"config key {key!r}: expected str, got {type(value).__name__}"
+        )
+    return value
 
 
 def _parse_reviewer_gates(raw: object) -> list[ReviewerGate]:
