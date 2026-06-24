@@ -14,6 +14,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from src.aggregate import Finding, Verdict
 from src.config import Config
 from src.metrics import (
@@ -367,6 +369,33 @@ def test_record_run_tolerates_non_utf8_gitignore(tmp_path: Path) -> None:
     )
     assert "claude-multi-agent-review:" in summary
     assert (tmp_path / "m.jsonl").is_file()  # write happened despite decode fail
+
+
+def test_record_run_refuses_symlinked_gitignore_escaping_repo(
+    tmp_path: Path,
+) -> None:
+    # If .gitignore is a symlink to a file OUTSIDE the repo, _ensure_gitignored
+    # must not follow it and append to that external file (Codex P2 on #19).
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    external = tmp_path / "external.gitignore"
+    external.write_text("original\n", encoding="utf-8")
+    try:
+        (repo / ".gitignore").symlink_to(external)
+    except (OSError, NotImplementedError) as e:
+        # Technical blocker: creating symlinks needs privilege/Developer Mode
+        # on Windows; the production guard is platform-independent regardless.
+        pytest.skip(f"symlink creation unsupported in this environment: {e}")
+
+    cfg = _config(repo, metrics_path="m.jsonl")
+    summary = record_run(
+        cfg, [_verdict("a")], [_usage("a")], changed_lines=1, exit_code=0,
+    )
+    # The external file was NOT mutated...
+    assert external.read_text(encoding="utf-8") == "original\n"
+    # ...and the metrics line was still written (the guard is gitignore-only).
+    assert (repo / "m.jsonl").is_file()
+    assert "claude-multi-agent-review:" in summary
 
 
 def test_record_run_gitignore_idempotent(tmp_path: Path) -> None:
