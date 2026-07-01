@@ -370,3 +370,40 @@ def test_load_repo_local_forward_compat_keys(tmp_path: Path) -> None:
     )
     cfg = load(install_root=tmp_path, repo_root=tmp_path)
     assert cfg.extra == {"future_key": "new feature"}
+
+
+# --- metrics keys (issue #19) ----------------------------------------------
+
+def test_metrics_defaults_when_absent() -> None:
+    # _good_data() omits the metrics keys — they're optional and default
+    # to on (opt-out) at the shipped default path.
+    cfg = _from_dict(_good_data())
+    assert cfg.metrics_enabled is True
+    assert cfg.metrics_path == ".claude-multi-agent-review/metrics.jsonl"
+
+
+def test_metrics_keys_not_treated_as_unknown(capsys) -> None:
+    # Recognized optional keys must NOT land in `extra` or trigger the
+    # unknown-key stderr notice.
+    data = _good_data()
+    data["metrics_enabled"] = False
+    data["metrics_path"] = "logs/m.jsonl"
+    cfg = _from_dict(data)
+    assert cfg.metrics_enabled is False
+    assert cfg.metrics_path == "logs/m.jsonl"
+    assert cfg.extra == {}
+    assert "metrics_enabled" not in capsys.readouterr().err
+
+
+def test_metrics_enabled_wrong_type_rejected() -> None:
+    data = _good_data()
+    data["metrics_enabled"] = "yes"  # type: ignore[assignment]
+    with pytest.raises(ValueError, match="metrics_enabled.*expected bool"):
+        _from_dict(data)
+
+
+def test_metrics_path_wrong_type_rejected() -> None:
+    data = _good_data()
+    data["metrics_path"] = 42  # type: ignore[assignment]
+    with pytest.raises(ValueError, match="metrics_path.*expected str"):
+        _from_dict(data)

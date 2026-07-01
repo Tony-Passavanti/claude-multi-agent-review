@@ -38,7 +38,8 @@ The hook reviews itself on push. Treat this file as a working contract.
     rules, report formatting
   - `src/config.py` — config dataclass and loader
   - `src/metrics.py` — per-reviewer token/cost capture from the `claude -p`
-    envelope (`ReviewerUsage` + pure parse/aggregate; no I/O)
+    envelope (`ReviewerUsage`) plus per-run record assembly and best-effort
+    JSONL persistence (`RunRecord`, `record_run`)
   - `src/personas/*.md` — reviewer prompts
   Adding a new module requires a documented role. WARN on unclear placement.
 
@@ -62,7 +63,9 @@ The hook reviews itself on push. Treat this file as a working contract.
   - `orchestrate.review_all`
   - `aggregate.aggregate`, `aggregate.Verdict`, `aggregate.Finding`
   - `config.Config`, `config.load`
-  - `metrics.ReviewerUsage`, `metrics.usage_from_stdout`, `metrics.combine`
+  - `metrics.ReviewerUsage`, `metrics.usage_from_stdout`, `metrics.combine`,
+    `metrics.RunRecord`, `metrics.build_run_record`, `metrics.record_run`,
+    `metrics.format_summary`
   Renaming or changing the signature of any of these is a FAIL unless
   the diff also updates every caller.
 
